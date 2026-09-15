@@ -1,93 +1,111 @@
 # Brookfield DV1 Viscosity Logger
 
-A Windows desktop app (PySide6) for logging, plotting, and analyzing viscosity
-readings taken from a Brookfield AMETEK DV1 Digital Viscometer.
+A Windows desktop app (PySide6) for logging, plotting and analysing viscosity readings
+taken with a Brookfield AMETEK DV1 Digital Viscometer. It uses the lab's shared
+**labkit** interface (the same one as AeroLab Studio and Supercap Suite): a navigation
+rail, light and dark themes, a Ctrl+K command palette, undo/redo, styled OriginLab graphs
+and a formatted Excel workbook.
+
+Made by Ezzeldien Yousef (ezzyousef2@aucegypt.edu), Energy Materials Laboratory (EML).
+A step-by-step user guide is in `docs/DV1_Logger_User_Guide.docx`.
 
 ## Important: about live instrument communication
 
-Before relying on this for lab work, please read this section.
+Brookfield's DV1 Operating Instructions (M14-023-A0416) say the DV1 talks to a PC over
+USB-B only through Brookfield's own **Wingather SQ** software, and no open ASCII command
+set is published for the DV1 (unlike the DV2+Pro, DV-II+, DV2T and DV3T). Rather than guess
+at command bytes for real lab hardware, **readings are entered manually**: read the value
+off the DV1 display and type it in. Logging, plots, statistics and every export work from
+manually entered data.
 
-Brookfield's official DV1 Operating Instructions manual (M14-023-A0416)
-states that the DV1 talks to a PC over its USB-B port only via Brookfield's
-own **Wingather SQ** software, and does not publish an open ASCII command set
-for the DV1 the way it does for some other models (e.g. DV2+Pro, DV-II+,
-DV2T/DV3T). I looked for a public DV1-specific serial protocol document and
-could not find one, and did not want to guess at command bytes to send to
-real lab hardware.
-
-Because of that, **this app's "Log Reading" tab is manual entry**: you read
-the value off the DV1's display and type it in. That is fully functional
-today -- logging, plotting, statistics, and Excel/CSV export all work from
-manually-entered data.
-
-There is also a **"Serial (Discovery)" tab** that gives you a raw,
-protocol-agnostic serial connection (port list, connect/disconnect, and a
-terminal to send/receive raw text) so you can experiment once you have real
-protocol documentation, or use it directly if you actually have a DV2+Pro /
-DV-II+ / DV2T / DV3T (those do have documented ASCII protocols).
-
-**To get live auto-logging working:** contact Brookfield/AMETEK technical
-support and ask for the "DV1 RS-232/USB Interface Command Reference" (or
-equivalent) for your specific instrument/firmware. Once you have verified
-commands, they go into `core/serial_interface.py` in the `DV1Protocol` class
-(there's a docstring there explaining exactly where). Send me that
-documentation and I can wire it up directly.
+The **Serial** page gives a raw, protocol-agnostic serial connection (port list,
+connect/disconnect, terminal, raw capture) for experimenting once you have the protocol
+documentation, or for instruments with a documented ASCII protocol. To wire up live
+auto-logging, ask Brookfield/AMETEK support for the DV1 interface command reference and put
+the verified commands into `DV1Protocol` in `core/serial_interface.py`.
 
 ## What's included
 
-- **Log Reading tab**: manual entry of viscosity, % torque, temperature, spindle,
-  speed, and model. Automatically calculates Full Scale Range (FSR) and Shear
-  Rate using the official formulas and spindle constants from Appendix D of
-  the DV1 manual, and flags readings outside Brookfield's recommended
-  10-100% torque range.
-- **Data Table tab**: all readings logged this session, with Excel and CSV export.
-- **Plots tab**: Viscosity vs Time, Viscosity vs Shear Rate, % Torque vs Time,
-  Temperature vs Time.
-- **Statistics tab**: mean/stdev/min/max per field, plus counts of
-  out-of-recommended-range torque readings.
-- **Serial (Discovery) tab**: raw port connect + terminal for protocol testing.
+| Page | What it does |
+|---|---|
+| **Dashboard** | Live-style readouts, viscometer connection, timed test (data interval, number of points, reminders), manual entry with full-scale range and shear-rate preview, spindle/speed advisor, readings table and live plot |
+| **Data table** | Every reading of the session; delete rows; save/load sessions; Excel, CSV and Origin export |
+| **Plots** | Viscosity vs time, viscosity vs shear rate (log–log with a power-law fit), % torque vs time (10 % and 100 % limits marked), temperature vs time |
+| **Statistics** | Mean, standard deviation, minimum and maximum per quantity; torque flags; flow behaviour index *n*, consistency *K* and R² |
+| **Serial** | Raw terminal and auto-capture for protocol discovery |
+| **About** | Author, lab, sources and environment |
+
+Calculations use the formulas and spindle constants of the DV1 manual, Appendix D:
+full-scale range = TK × SMC × 10 000 / RPM and shear rate = SRC × RPM. The power-law
+(Ostwald–de Waele) fit is a linear regression of ln η on ln γ̇.
+
+### Exports
+
+- **Send to Origin** — one workbook with a column pair per trace, the readings table and a
+  Results sheet, plus a styled graph per plot (colour-blind-safe palette, log axes, the fit in
+  its data colour, legend placed clear of the data). Every send adds to the same Origin
+  project; the arrow menu saves the project (.opju) or closes Origin. Without Origin,
+  **Write LabTalk package** produces CSVs and a script that rebuilds the project on any PC
+  with Origin (drag `AeroLab_build.ogs` into Origin).
+- **Export to Excel** — Summary, per-analysis sheet with results and readings, native Excel
+  charts, and a Provenance sheet.
+- **Save figures** — 300 dpi PNGs; **Export to CSV** — the raw readings.
+
+### Keyboard
+
+| Keys | Action |
+|---|---|
+| Ctrl+Return | Add reading |
+| Ctrl+Z / Ctrl+Y | Undo / redo (add, delete, load, clear) |
+| Ctrl+O / Ctrl+S | Load / save session |
+| Ctrl+E / Ctrl+Shift+O | Export to Excel / send to Origin |
+| F5 / Shift+F5 | Start / stop a timed run |
+| Ctrl+K | Command palette |
+| Ctrl+1 … Ctrl+6 | Go to a page |
 
 ## Setup (Windows)
 
-1. Install Python 3.10+ from python.org (check "Add to PATH" during install).
-2. Open a terminal in this folder and run:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Run the app:
-   ```
-   python main.py
-   ```
+1. Install Python 3.11+ from python.org (tick "Add to PATH").
+2. In this folder: `pip install -r requirements.txt`
+3. Run: `python main.py`
 
-## Building a standalone .exe (optional)
+`python main.py --selftest` checks the whole application without opening a window;
+`python -m pytest tests` runs the test suite.
+
+## Building the executable and installer
 
 ```
-pip install pyinstaller
-pyinstaller --onefile --windowed --name DV1Logger main.py
+.\build.ps1
 ```
-The `.exe` will be built for the OS you run this command on -- run it on a
-Windows machine to get a Windows executable.
+
+This runs the tests, builds `dist\DV1Logger\` with PyInstaller, runs the built exe's
+self-test, packs a portable zip and compiles `installer_output\DV1Logger-Setup-<version>.exe`
+with Inno Setup (`winget install JRSoftware.InnoSetup` if it is missing).
 
 ## Project structure
 
 ```
 brookfield_dv1_logger/
-├── main.py                  # entry point
-├── ui/
-│   └── main_window.py       # all GUI code
+├── main.py                  entry point (splash, --selftest, --version)
+├── selftest.py              headless check used on packaged builds
 ├── core/
-│   ├── analysis.py          # spindle/model constants, FSR/shear-rate math, stats
-│   ├── data_io.py           # Excel/CSV export/import
-│   └── serial_interface.py  # raw serial link + notes on the DV1 protocol gap
-├── requirements.txt
-└── README.md
+│   ├── analysis.py          spindle/model constants, FSR and shear rate, statistics, power-law fit
+│   ├── data_io.py           sessions (JSON), CSV and Excel export
+│   ├── figures.py           the four figures, the Origin book and the Excel report
+│   └── serial_interface.py  raw serial link and notes on the DV1 protocol gap
+├── ui/
+│   ├── main_window.py       the application window (pages, menus, undo/redo)
+│   ├── widgets.py           collapsible section
+│   └── resources.py         version, author, asset paths
+├── labkit/                  vendored shared interface — edit ..\..\labkit and run sync.py
+├── tests/                   pytest suite
+├── DV1Logger.spec, build.ps1, installer.iss
+└── docs/
 ```
 
 ## Data source / accuracy notes
 
-Spindle and model constants (SMC, SRC, TK) in `core/analysis.py` were
-transcribed from Brookfield AMETEK's official DV1 Operating Instructions
-manual (M14-023-A0416), Appendix D. If you use spindles/accessories not
-listed there, or a different manual revision, double-check the constants
-against your own printed manual before trusting calculated FSR/shear-rate
-values -- transcription errors are possible.
+Spindle and model constants (SMC, SRC, TK) in `core/analysis.py` were transcribed from the
+DV1 Operating Instructions (M14-023-A0416), Appendix D. For spindles or accessories not
+listed there, or another manual revision, check the constants against your printed manual
+before trusting calculated full-scale range or shear-rate values.

@@ -6,11 +6,13 @@
 ; installer: Start Menu shortcut, optional Desktop shortcut, Add/Remove
 ; Programs entry, and a proper uninstaller.
 ;
-; Requires dist\DV1Logger\ to already exist -- run
-; `pyinstaller DV1Logger.spec` from this folder first.
+; Requires dist\DV1Logger\ to already exist -- run build.ps1, which builds,
+; self-tests and then compiles this script.
 
 #define MyAppName "DV1 Logger"
-#define MyAppVersion "1.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "2.0.0"
+#endif
 #define MyAppPublisher "Ezzeldien Yousef"
 #define MyAppURL "mailto:ezzyousef2@aucegypt.edu"
 #define MyAppExeName "DV1Logger.exe"
@@ -28,7 +30,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=installer_output
-OutputBaseFilename=DV1Logger-Setup
+OutputBaseFilename=DV1Logger-Setup-{#MyAppVersion}
 SetupIconFile=assets\app_icon.ico
 Compression=lzma2
 SolidCompression=yes

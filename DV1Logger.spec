@@ -1,16 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Build with .\build.ps1, or:  python -m PyInstaller DV1Logger.spec --noconfirm
+from PyInstaller.utils.hooks import collect_submodules
 
+hiddenimports = [
+    "matplotlib.backends.backend_qtagg",
+    "matplotlib.backends.backend_agg",
+    "xlsxwriter",
+    "openpyxl",
+    "serial.tools.list_ports",
+    "selftest",
+] + collect_submodules("labkit")
+# originpro is optional: include it when installed so the built app can drive Origin directly.
+try:
+    import originpro                        # noqa: F401
+    hiddenimports += collect_submodules("originpro") + ["win32com.client", "pythoncom", "pywintypes"]
+except ImportError:
+    pass
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[('assets', 'assets')],
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "IPython", "jupyter", "notebook",
+              "pytest", "sphinx", "pandas.tests", "matplotlib.backends.backend_tkagg",
+              "matplotlib.backends.backend_webagg"],
     noarchive=False,
     optimize=0,
 )

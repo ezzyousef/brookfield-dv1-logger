@@ -9,6 +9,7 @@ function so callers never need an if/else for "am I frozen."
 import sys
 from pathlib import Path
 
+APP_VERSION = "2.0.0"
 AUTHOR_NAME = "Ezzeldien Yousef"
 AUTHOR_EMAIL = "ezzyousef2@aucegypt.edu"
 COPYRIGHT_YEAR = "2026"

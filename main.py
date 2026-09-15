@@ -2,8 +2,7 @@ import sys
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import QApplication, QSplashScreen
-from ui.resources import load_app_icon, asset_path, AUTHOR_NAME
-from ui.theme import apply_theme
+from ui.resources import APP_VERSION, AUTHOR_NAME, asset_path, load_app_icon
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -60,7 +59,7 @@ def _prewarm_heavy_imports(app: QApplication) -> None:
     processEvents() in between keeps the message pump alive throughout."""
     modules = [
         "numpy", "pandas", "matplotlib", "matplotlib.backends.backend_qtagg",
-        "openpyxl", "serial",
+        "openpyxl", "xlsxwriter", "serial", "labkit.figure", "labkit.qt.shell",
     ]
     for module_name in modules:
         try:
@@ -71,18 +70,25 @@ def _prewarm_heavy_imports(app: QApplication) -> None:
 
 
 def main():
+    if "--version" in sys.argv:
+        print(f"Brookfield DV1 Viscosity Logger {APP_VERSION}")
+        return
+    if "--selftest" in sys.argv:
+        from selftest import run_selftest
+        sys.exit(run_selftest())
+
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     app.setApplicationName("Brookfield DV1 Viscosity Logger")
     app.setOrganizationName(AUTHOR_NAME)
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion(APP_VERSION)
     app.setWindowIcon(load_app_icon())
     # Fusion style uses Qt's own popup rendering for QComboBox instead of the
     # native Windows popup, which avoids a known Windows-specific bug where a
     # combo box's dropdown can close itself immediately on click (race
     # between the native popup opening and the mouse-release event).
+    # The shared labkit stylesheet is applied on top by the window itself.
     app.setStyle("Fusion")
-    apply_theme(app)
 
     splash = _show_splash(app)
     _prewarm_heavy_imports(app)

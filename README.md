@@ -7,7 +7,8 @@ rail, light and dark themes, a Ctrl+K command palette, undo/redo, styled OriginL
 and a formatted Excel workbook.
 
 Made by Ezzeldien Yousef (ezzyousef2@aucegypt.edu), Energy Materials Laboratory (EML).
-A step-by-step user guide is in `docs/DV1_Logger_User_Guide.docx`.
+A step-by-step user guide with screenshots is in `DV1_Logger_User_Guide.docx` (this folder);
+`docs/MANUAL.md` covers sample preparation and measurement practice.
 
 ## Important: about live instrument communication
 

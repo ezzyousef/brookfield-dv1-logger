@@ -293,7 +293,9 @@ class AppShell(QMainWindow):
                 label.setObjectName("NavSection")
                 self._rail_layout.addWidget(label)
                 last_section = entry.section
-            btn = QPushButton(f"  {entry.glyph}   {entry.title}")
+            # "&" would otherwise become a keyboard mnemonic ("Sources & references" showed
+            # as "Sources _references").
+            btn = QPushButton(f"  {entry.glyph}   {entry.title.replace('&', '&&')}")
             btn.setObjectName("NavButton")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -327,7 +329,7 @@ class AppShell(QMainWindow):
             self.action_redo = self.add_menu_action("&Edit", "&Redo", self.redo, QKeySequence.Redo)
         for key in self._order:
             entry = self._pages[key]
-            self.add_menu_action("&View", entry.title, lambda k=key: self.go_to(k))
+            self.add_menu_action("&View", entry.title.replace("&", "&&"), lambda k=key: self.go_to(k))
         self.add_menu_separator("&View")
         self.add_menu_action("&View", "Toggle light / dark theme", self.toggle_theme, "Ctrl+T")
         self.add_menu_action("&View", "Command palette…", self.show_palette, "Ctrl+K")
@@ -440,7 +442,7 @@ class AppShell(QMainWindow):
         self._theme = theme if theme in ("light", "dark") else "light"
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(T.stylesheet(self._theme, self.info.accent))
+            app.setStyleSheet(T.stylesheet(self._theme, self.info.accent) + self.extra_stylesheet(self._theme))
         self.settings.setValue("theme", self._theme)
         for entry in self._pages.values():
             if entry.slot.is_built:
@@ -448,6 +450,10 @@ class AppShell(QMainWindow):
                 if callable(hook):
                     hook(self._theme)
         self.theme_changed.emit(self._theme)
+
+    def extra_stylesheet(self, theme: str) -> str:
+        """Application-specific rules appended to the shared stylesheet (override)."""
+        return ""
 
     def toggle_theme(self) -> None:
         self.apply_theme("dark" if self._theme == "light" else "light")

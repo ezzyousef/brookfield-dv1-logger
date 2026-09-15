@@ -47,7 +47,7 @@ from labkit.qt.exporting import ExportBar
 from labkit.qt.history import History
 from labkit.qt.origin_worker import OriginWorker
 from labkit.qt.shell import AppInfo, AppShell
-from labkit.qt.widgets import Card, EmptyState, MetricTile, Pill, PlotCanvas, ResultTable, scrollable
+from labkit.qt.widgets import Card, EmptyState, MetricTile, Pill, PlotCanvas, ResponsiveRow, ResultTable, scrollable
 from ui.resources import APP_VERSION, AUTHOR_EMAIL, AUTHOR_NAME, asset_path
 from ui.widgets import CollapsibleSection
 
@@ -297,9 +297,9 @@ class MainWindow(AppShell):
         note.setWordWrap(True)
         outer.addWidget(note)
 
-        # --- readouts (left) + viscometer connection (right)
-        top_row = QHBoxLayout()
-        top_row.setSpacing(12)
+        # --- readouts (left) + viscometer connection (right); stacked on a narrow window,
+        # where side by side they were cut off at the right edge.
+        top_row = ResponsiveRow(breakpoint=980)
         readouts = Card("Current reading")
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -323,6 +323,10 @@ class MainWindow(AppShell):
         conn_form.setVerticalSpacing(8)
         port_row = QHBoxLayout()
         self.port_combo = QComboBox()
+        # Port descriptions are long ("COM6 - Standard Serial over Bluetooth link …"); the combo
+        # must not size the whole card to them. Its drop-down still shows them in full.
+        self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.port_combo.setMinimumContentsLength(14)
         search_btn = QPushButton("Search")
         search_btn.clicked.connect(self._refresh_ports)
         port_row.addWidget(self.port_combo, 1)
@@ -347,13 +351,11 @@ class MainWindow(AppShell):
         conn.body.addLayout(conn_form)
         self._refresh_ports()
         top_row.addWidget(conn, 2)
-        outer.addLayout(top_row)
+        outer.addWidget(top_row)
 
-        # --- test setup and status
-        setup_box = QWidget()
-        setup_layout = QHBoxLayout(setup_box)
-        setup_layout.setContentsMargins(0, 0, 0, 0)
-        setup_layout.setSpacing(12)
+        # --- test setup and status (stacked on a narrow window)
+        setup_box = ResponsiveRow(breakpoint=820)
+        setup_layout = setup_box
         params = Card("Test parameters")
         params_form = QFormLayout()
         self.data_interval_edit = QLineEdit("00:05")
@@ -395,8 +397,7 @@ class MainWindow(AppShell):
         setup_layout.addWidget(run)
         outer.addWidget(CollapsibleSection("Test setup and status", content_widget=setup_box, start_expanded=True))
 
-        status_row = QHBoxLayout()
-        status_row.setSpacing(10)
+        status_row = ResponsiveRow(breakpoint=620, spacing=10)
         self.elapsed_label = MetricTile("Elapsed time", "00:00")
         self.readings_taken_label = MetricTile("Readings taken", "0")
         self.time_until_next_label = MetricTile("Next reading in", "—")
@@ -404,7 +405,7 @@ class MainWindow(AppShell):
         for tile in (self.elapsed_label, self.readings_taken_label, self.time_until_next_label,
                      self.program_status_label):
             status_row.addWidget(tile)
-        outer.addLayout(status_row)
+        outer.addWidget(status_row)
 
         # --- manual reading entry
         entry = Card("Manual reading entry", "Read the values off the DV1 display, then Add reading (Ctrl+Enter).")

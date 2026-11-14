@@ -18,7 +18,7 @@ Pages:
   Instrument  Serial        raw terminal and auto-capture for protocol discovery.
                             Connect and disconnect from the Dashboard; this page shares
                             that connection.
-  Help        About
+  Help        About (Help > Licence… shows licence status; licensing is not enforced)
 """
 
 from __future__ import annotations
@@ -193,6 +193,7 @@ class MainWindow(AppShell):
         self.add_command("Send to Origin", "Export", self.export_bar_origin)
         self.add_command("Export to CSV", "Export", self._export_csv)
         self.add_command("Clear session", "Session", self._clear_session)
+        self.add_command("Licence", "Help", self._show_licence)
         self.on_close(self._on_close)
 
         self.finalize(start_page="dashboard")
@@ -212,6 +213,12 @@ class MainWindow(AppShell):
         self.add_menu_action("&Measure", "&Add reading", self._add_manual_reading, "Ctrl+Return")
         self.add_menu_action("&Measure", "Start &run", self._start_run, "F5")
         self.add_menu_action("&Measure", "S&top run", self._stop_run, "Shift+F5")
+        self.add_menu_action("&Help", "&About", lambda: self.go_to("about"))
+        self.add_menu_action("&Help", "&Licence…", self._show_licence)
+
+    def _show_licence(self) -> None:
+        from ui.licence_dialog import LicenceDialog
+        LicenceDialog(self, notify=self.notify).exec()
 
     def _about_tiles(self):
         return [("Spindles", str(len(SPINDLE_TABLE))), ("Models", str(len(MODEL_TABLE))),

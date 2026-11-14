@@ -9,6 +9,9 @@ hiddenimports = [
     "openpyxl",
     "serial.tools.list_ports",
     "selftest",
+    # labkit.licence imports these lazily (inside verify()), so name them explicitly.
+    "cryptography.exceptions",
+    "cryptography.hazmat.primitives.asymmetric.ed25519",
 ] + collect_submodules("labkit")
 # originpro is optional: include it when installed so the built app can drive Origin directly.
 try:

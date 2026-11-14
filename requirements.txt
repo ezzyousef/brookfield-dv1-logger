@@ -5,6 +5,8 @@ openpyxl>=3.1
 xlsxwriter>=3.1
 matplotlib>=3.7
 pyserial>=3.5
+# Offline licence verification (labkit.licence, Ed25519). Licensing is not enforced.
+cryptography>=44
 
 # Optional: drive OriginLab directly (Windows with Origin 2021 or newer installed).
 # Without them "Send to Origin" writes a LabTalk package that rebuilds the project in Origin.

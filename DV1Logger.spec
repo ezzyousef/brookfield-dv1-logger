@@ -24,7 +24,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
+    datas=[('assets', 'assets'), ('examples', 'examples')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

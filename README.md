@@ -19,9 +19,13 @@ at command bytes for real lab hardware, **readings are entered manually**: read 
 off the DV1 display and type it in. Logging, plots, statistics and every export work from
 manually entered data.
 
-The **Serial** page gives a raw, protocol-agnostic serial connection (port list,
-connect/disconnect, terminal, raw capture) for experimenting once you have the protocol
-documentation, or for instruments with a documented ASCII protocol. To wire up live
+The **Instrument** page offers a simulated viscometer (for training), replay of recorded
+sessions, and user-supplied *documented* line protocols for other instruments
+(`docs/PROTOCOL_DEFINITIONS.md`). It also has a raw serial terminal. **Every connection is
+read-only:** nothing is sent until you allow sending and name the protocol document you are
+following, and the permission ends when you disconnect. Definitions for the DV1 are refused.
+Every reading is labelled with its source (manually transcribed, simulated, replayed, or
+received from an instrument). To wire up live
 auto-logging, ask Brookfield/AMETEK support for the DV1 interface command reference and put
 the verified commands into `DV1Protocol` in `core/serial_interface.py`.
 
@@ -30,15 +34,26 @@ the verified commands into `DV1Protocol` in `core/serial_interface.py`.
 | Page | What it does |
 |---|---|
 | **Dashboard** | Live-style readouts, viscometer connection, timed test (data interval, number of points, reminders), manual entry with full-scale range and shear-rate preview, spindle/speed advisor, readings table and live plot |
-| **Data table** | Every reading of the session; delete rows; save/load sessions; Excel, CSV and Origin export |
+| **Data table** | Every reading of the session with its source and QC flags; delete rows; save/load sessions; CSV import; Excel, CSV and Origin export |
+| **Notebook** | Instrument ID and serial, calibration date and interval, protocol, operator, sample preparation, temperature set point, measurement checklist, PC clock check, and the audit trail |
 | **Plots** | Viscosity vs time, viscosity vs shear rate (log–log with a power-law fit), % torque vs time (10 % and 100 % limits marked), temperature vs time |
-| **Statistics** | Mean, standard deviation, minimum and maximum per quantity; torque flags; flow behaviour index *n*, consistency *K* and R² |
-| **Serial** | Raw terminal and auto-capture for protocol discovery |
+| **Statistics** | Mean, standard deviation, minimum and maximum per quantity; torque flags; Newtonian, power-law, Bingham, Herschel–Bulkley, Cross and Carreau fits with 95 % intervals and AICc ranking (only fitted when the data support them) |
+| **Compare** | Repeatability per sample and speed (s, CV, u, U95), flow curves of every sample, hysteresis of up/down sweeps |
+| **Instrument** | Simulation, replay and documented-protocol sources; read-only-by-default terminal and raw capture |
 | **About** | Author, lab, sources and environment |
 
 Calculations use the formulas and spindle constants of the DV1 manual, Appendix D:
-full-scale range = TK × SMC × 10 000 / RPM and shear rate = SRC × RPM. The power-law
-(Ostwald–de Waele) fit is a linear regression of ln η on ln γ̇.
+full-scale range = TK × SMC × 10 000 / RPM and shear rate = SRC × RPM. Each reading is
+checked against viscosity = % torque / 100 × full-scale range, to catch transcription errors.
+Each reading also gets automatic QC flags: torque window, temperature set point, late entry,
+double entry, and calibration overdue. Flow models are fitted on log residuals.
+`docs/EQUATION_REGRESSION_REPORT.md` compares every formula and model with independent
+calculations. Model parameters describe the measured shear-rate range only; they are not
+measurements.
+
+Sessions are saved in format 2 (readings, notebook, audit trail, export revision). Sessions
+saved by 2.0.0 still open. Saving is atomic, and the open session is mirrored to a local
+recovery file, which is offered back after an unexpected exit.
 
 ### Exports
 
@@ -57,12 +72,15 @@ full-scale range = TK × SMC × 10 000 / RPM and shear rate = SRC × RPM. The po
 | Keys | Action |
 |---|---|
 | Ctrl+Return | Add reading |
+| Enter (or numpad Enter) | Viscosity → % torque → temperature → add reading |
+| Ctrl+Shift+N | Next sample in the batch queue |
+| Ctrl+Shift+L / Ctrl+Shift+H | Large touch-friendly controls / high-contrast readout |
 | Ctrl+Z / Ctrl+Y | Undo / redo (add, delete, load, clear) |
 | Ctrl+O / Ctrl+S | Load / save session |
 | Ctrl+E / Ctrl+Shift+O | Export to Excel / send to Origin |
 | F5 / Shift+F5 | Start / stop a timed run |
 | Ctrl+K | Command palette |
-| Ctrl+1 … Ctrl+6 | Go to a page |
+| Ctrl+1 … Ctrl+8 | Go to a page |
 
 ## Setup (Windows)
 

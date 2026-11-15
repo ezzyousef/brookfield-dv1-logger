@@ -78,3 +78,14 @@ def test_excel_report_has_charts_results_and_readings(readings, tmp_path):
     text = " ".join(str(c.value) for ws in book for row in ws.iter_rows() for c in row if c.value is not None)
     for needle in ("Flow behaviour index n", "SC4-18", "Ezzeldien Yousef", "M14-023-A0416"):
         assert needle in text, needle
+
+
+def test_excel_report_never_turns_a_note_into_a_formula(tmp_path):
+    readings = make_readings()
+    readings[0].notes = "=1+1"
+    readings[1].product = "@SUM(A1:A3)"
+    path = write_workbook(excel_report(readings, version="2.1.0"), tmp_path / "f.xlsx")
+    book = openpyxl.load_workbook(path)
+    formulas = [c.coordinate for ws in book for row in ws.iter_rows() for c in row
+                if c.data_type == "f" or (isinstance(c.value, str) and c.value.startswith(("=1+1", "@SUM")))]
+    assert formulas == []

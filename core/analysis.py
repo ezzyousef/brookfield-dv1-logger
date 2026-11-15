@@ -225,6 +225,21 @@ def percent_torque_status(percent_torque: Optional[float]) -> str:
     return "ok"
 
 
+# Where a reading came from. Only "manual" is typed in by a person; it is a transcription of the
+# instrument display, not a value received from the instrument, and every export says so.
+SOURCE_LABELS = {
+    "manual": "manually transcribed",
+    "serial": "received from instrument",
+    "protocol": "received from instrument (documented protocol)",
+    "simulated": "simulated (not a measurement)",
+    "replay": "replayed from a recorded file",
+}
+
+
+def source_label(source: str) -> str:
+    return SOURCE_LABELS.get(source, source or "unknown")
+
+
 @dataclass
 class Reading:
     """A single logged data point, whether entered manually or received over serial."""
@@ -235,10 +250,14 @@ class Reading:
     rpm: Optional[float] = None
     spindle: Optional[str] = None
     model: Optional[str] = None
-    source: str = "manual"  # "manual" or "serial"
+    source: str = "manual"  # see SOURCE_LABELS: manual | serial | simulated | replay | protocol
     notes: str = ""
     product: str = ""
     batch: str = ""
+    # added in 2.1.0 (session format 2); defaults keep every 2.0.0 session loadable
+    sample_id: str = ""
+    operator: str = ""
+    qc_flags: list = field(default_factory=list)
 
     def torque_status(self) -> str:
         return percent_torque_status(self.percent_torque)
@@ -255,6 +274,9 @@ class Reading:
         if self.spindle is None or self.model is None or self.rpm is None:
             return None
         return full_scale_range_cp(self.model, self.spindle, self.rpm)
+
+    def source_label(self) -> str:
+        return source_label(self.source)
 
 
 def summarize(readings: list[Reading]) -> dict:

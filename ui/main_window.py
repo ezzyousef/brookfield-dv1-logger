@@ -24,24 +24,35 @@ Pages:
 from __future__ import annotations
 
 import csv
+import math
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout, QGridLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QGridLayout,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
     QSpinBox, QSplitter, QTableView, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from core import recovery
 from core.analysis import (
     MODEL_TABLE, SPINDLE_TABLE, VALID_SPEEDS_RPM, Reading, percent_torque_status,
     power_law_fit, recommend_spindle_speed, summarize,
 )
-from core.data_io import export_to_csv, load_session_json, save_session_json
-from core.figures import PLOT_KINDS, PLOT_TITLES, build_figure, excel_report, interpret_flow_index, origin_book
+from core.data_io import (ImportError_, SessionError, export_to_csv, load_session, readings_from_csv,
+                          save_session)
+from core.figures import (PLOT_KINDS, PLOT_TITLES, build_figure, excel_report, interpret_flow_index,
+                          origin_book, provenance_fields)
+from core.instruments import AdapterError, ProtocolAdapter, ProtocolDefinition, ReplayAdapter, SimulatedViscometer
+from core.qc import qc_flags
+from core.rheology import compare_models
 from core.serial_interface import (
-    PYSERIAL_AVAILABLE, RawSerialLink, SerialConnectionError, list_available_ports_detailed,
+    PYSERIAL_AVAILABLE, RawSerialLink, SerialConnectionError, WriteNotAuthorized, list_available_ports_detailed,
 )
+from core.session import AuditEntry, ExperimentNotebook, Session
+from labkit.io import Provenance
+from labkit.qt.errors import show_error
 from labkit.qt.about import AboutPage
 from labkit.qt.exporting import ExportBar
 from labkit.qt.history import History
@@ -50,6 +61,7 @@ from labkit.qt.shell import AppInfo, AppShell
 from labkit.qt.widgets import Card, EmptyState, MetricTile, Pill, PlotCanvas, ResponsiveRow, ResultTable, scrollable
 from ui.resources import APP_VERSION, AUTHOR_EMAIL, AUTHOR_NAME, asset_path
 from ui.widgets import CollapsibleSection
+from ui import pages
 
 APP_INFO = AppInfo(
     name="Brookfield DV1 Viscosity Logger",
@@ -71,6 +83,8 @@ APP_INFO = AppInfo(
         "Recommended 10–100 % torque window: Brookfield AMETEK, DV1 Operating Instructions.",
         "Power-law (Ostwald–de Waele) model: Steffe, J. F. <i>Rheological Methods in Food "
         "Process Engineering</i>, 2nd ed., ch. 2.",
+        "Bingham, Herschel–Bulkley, Cross and Carreau flow models: standard forms as given in rheology "
+        "textbooks such as Steffe (above), fitted with η∞ fixed at 0 for Cross and Carreau.",
         "The DV1's live serial command set is not publicly documented — see the Serial page.",
     ],
 )
@@ -80,7 +94,7 @@ class ReadingsTableModel(QAbstractTableModel):
     COLUMNS = [
         "Time", "Product", "Batch", "Viscosity (cP)", "% Torque", "Status", "Temp (C)",
         "RPM", "Spindle", "Model", "Shear Rate (1/s)", "Shear Stress (dyn/cm2)",
-        "FSR (cP)", "Source", "Notes",
+        "FSR (cP)", "Source", "Notes", "Sample ID", "QC flags",
     ]
 
     def __init__(self, readings: list[Reading]):
@@ -100,7 +114,8 @@ class ReadingsTableModel(QAbstractTableModel):
         values = [
             r.timestamp.strftime("%Y-%m-%d %H:%M:%S"), r.product, r.batch, r.viscosity_cp,
             r.percent_torque, r.torque_status(), r.temperature_c, r.rpm, r.spindle, r.model,
-            r.shear_rate(), r.shear_stress(), r.fsr(), r.source, r.notes,
+            r.shear_rate(), r.shear_stress(), r.fsr(), r.source_label(), r.notes, r.sample_id,
+            "; ".join(r.qc_flags),
         ]
         v = values[index.column()]
         if role == Qt.TextAlignmentRole:
@@ -146,6 +161,17 @@ class MainWindow(AppShell):
         super().__init__(APP_INFO, history=history)
         self.readings = readings
         self.table_model = ReadingsTableModel(self.readings)
+        self.notebook = ExperimentNotebook()
+        self.audit: list[AuditEntry] = []
+        self.export_revision = 0
+        self._nb_loading = False
+        self.run_due_at: datetime | None = None
+        self.sample_queue: list[str] = []
+        self.adapter = None
+        self.adapter_timer = QTimer(self)
+        self.adapter_timer.timeout.connect(self._on_adapter_tick)
+        self.autosave_enabled = True
+        self.dirty = False
 
         self.serial_link: RawSerialLink | None = None
         self.raw_capture: list[tuple[datetime, str]] = []
@@ -174,13 +200,19 @@ class MainWindow(AppShell):
                       framed=True, lazy=False)
         self.add_page("table", "Data table", self._build_table_tab, section="Measure", glyph="▤",
                       subtitle="Every reading logged this session.")
+        self.add_page("notebook", "Notebook", lambda: pages.build_notebook_page(self), section="Measure",
+                      glyph="✎", heading="Experiment notebook",
+                      subtitle="Instrument, calibration, protocol, checklist and the audit trail.")
         self.add_page("plots", "Plots", self._build_plots_tab, section="Analyse", glyph="◭",
                       subtitle="Viscosity, torque and temperature — the same figures sent to Origin.")
         self.add_page("stats", "Statistics", self._build_stats_tab, section="Analyse", glyph="∑",
-                      subtitle="Summary statistics, torque flags and the power-law fit.")
-        self.add_page("serial", "Serial", self._build_serial_tab, section="Instrument", glyph="⇄",
-                      heading="Serial (discovery)",
-                      subtitle="A raw terminal for protocol discovery, sharing the Dashboard's connection.")
+                      subtitle="Summary statistics, torque flags and flow-model comparison.")
+        self.add_page("compare", "Compare", lambda: pages.build_compare_page(self), section="Analyse", glyph="≋",
+                      heading="Compare samples",
+                      subtitle="Repeatability, replicate uncertainty, flow curves and hysteresis.")
+        self.add_page("serial", "Instrument", self._build_serial_tab, section="Instrument", glyph="⇄",
+                      heading="Instrument sources and serial terminal",
+                      subtitle="Simulation, replay, documented protocols, and a read-only-by-default terminal.")
         self.add_page("about", "About", lambda: AboutPage(APP_INFO, tiles=self._about_tiles(),
                                                           notify=self.notify),
                       section="Help", glyph="ⓘ")
@@ -193,12 +225,18 @@ class MainWindow(AppShell):
         self.add_command("Send to Origin", "Export", self.export_bar_origin)
         self.add_command("Export to CSV", "Export", self._export_csv)
         self.add_command("Clear session", "Session", self._clear_session)
+        self.add_command("Import readings from CSV", "File", self._import_csv)
+        self.add_command("Next sample in queue", "Measure", self._next_sample)
+        self.add_command("Measurement checklist", "Measure", lambda: self.go_to("notebook"))
+        self.add_command("Toggle large controls", "View", self._toggle_large_controls)
+        self.add_command("Toggle high-contrast readout", "View", self._toggle_high_contrast)
         self.add_command("Licence", "Help", self._show_licence)
         self.on_close(self._on_close)
 
         self.finalize(start_page="dashboard")
         self._restore_settings()
         self._update_counts()
+        QTimer.singleShot(0, self._offer_recovery)
 
     # ------------------------------------------------------------------ menus
     def _build_file_menu(self) -> None:
@@ -207,12 +245,20 @@ class MainWindow(AppShell):
         self.add_menu_separator("&File")
         self.add_menu_action("&File", "Export to &Excel…", self.export_bar_excel, "Ctrl+E")
         self.add_menu_action("&File", "Export to &CSV…", self._export_csv)
+        self.add_menu_action("&File", "&Import readings from CSV…", self._import_csv)
         self.add_menu_action("&File", "Send to &Origin", self.export_bar_origin, "Ctrl+Shift+O")
         self.add_menu_separator("&File")
         self.add_menu_action("&File", "E&xit", self.close, "Ctrl+Q")
         self.add_menu_action("&Measure", "&Add reading", self._add_manual_reading, "Ctrl+Return")
         self.add_menu_action("&Measure", "Start &run", self._start_run, "F5")
         self.add_menu_action("&Measure", "S&top run", self._stop_run, "Shift+F5")
+        self.add_menu_action("&Measure", "&Next sample in queue", self._next_sample, "Ctrl+Shift+N")
+        self.add_menu_action("&Measure", "Measurement &checklist", lambda: self.go_to("notebook"))
+        self.act_large = self.add_menu_action("&View", "&Large controls", self._toggle_large_controls, "Ctrl+Shift+L")
+        self.act_large.setCheckable(True)
+        self.act_contrast = self.add_menu_action("&View", "&High-contrast readout", self._toggle_high_contrast,
+                                                 "Ctrl+Shift+H")
+        self.act_contrast.setCheckable(True)
         self.add_menu_action("&Help", "&About", lambda: self.go_to("about"))
         self.add_menu_action("&Help", "&Licence…", self._show_licence)
 
@@ -230,11 +276,19 @@ class MainWindow(AppShell):
         return ExportBar(
             worker=self.origin,
             books=lambda: [origin_book(self.readings)] if self.readings else [],
-            report=lambda: (excel_report(self.readings, version=APP_VERSION, author=AUTHOR_NAME,
-                                         project=self._project_name(), settings=self._settings_snapshot())
-                            if self.readings else None),
+            report=self._excel_report_for_export,
             figures=lambda: [build_figure(k, self.readings) for k in PLOT_KINDS],
             notify=self.notify, project_name=self._project_name)
+
+    def _excel_report_for_export(self):
+        """Called by the export bar when the user exports to Excel: each export is a new revision."""
+        if not self.readings:
+            return None
+        self.export_revision += 1
+        self._audit("export", f"Excel workbook, revision {self.export_revision}")
+        return excel_report(self.readings, version=APP_VERSION, author=self.notebook.operator or AUTHOR_NAME,
+                            project=self._project_name(), settings=self._settings_snapshot(),
+                            notebook=self.notebook, revision=self.export_revision)
 
     def export_bar_excel(self) -> None:
         self._shared_export_bar().export_excel()
@@ -278,7 +332,13 @@ class MainWindow(AppShell):
             self._refresh_plot(quiet=True)
         if self.is_page_built("stats"):
             self._refresh_stats()
+        if self.is_page_built("compare"):
+            pages.refresh_compare_page(self)
+        if self.is_page_built("notebook"):
+            pages.refresh_notebook_page(self)
         self._update_counts()
+        self.dirty = True
+        self._autosave()
 
     def _fit_table_columns(self) -> None:
         """Size columns to their contents so timestamps and torque status are not cut off."""
@@ -320,6 +380,14 @@ class MainWindow(AppShell):
                                   self.dash_shear_stress_out, self.dash_shear_rate_out, self.dash_temp_out)):
             grid.addWidget(tile, i // 3, i % 3)
         readouts.body.addLayout(grid)
+        self.big_readout = QLabel("— cP")
+        self.big_readout.setObjectName("BigReadout")
+        self.big_readout.setAlignment(Qt.AlignCenter)
+        self.big_readout.setTextFormat(Qt.RichText)
+        self.big_readout.setWordWrap(True)
+        self.big_readout.setAccessibleName("Latest viscosity")
+        self.big_readout.setToolTip("Latest viscosity and its source. View > High-contrast readout (Ctrl+Shift+H).")
+        readouts.body.addWidget(self.big_readout)
         top_row.addWidget(readouts, 3)
 
         conn = Card("Viscometer")
@@ -355,6 +423,10 @@ class MainWindow(AppShell):
         self.in_spindle = QComboBox()
         self.in_spindle.addItems(sorted(SPINDLE_TABLE.keys()))
         conn_form.addRow(_form_label("Spindle"), self.in_spindle)
+        self.constants_label = QLabel("")
+        self.constants_label.setObjectName("Hint")
+        self.constants_label.setWordWrap(True)
+        conn_form.addRow("", self.constants_label)
         conn.body.addLayout(conn_form)
         self._refresh_ports()
         top_row.addWidget(conn, 2)
@@ -372,6 +444,15 @@ class MainWindow(AppShell):
         self.num_points_spin.setRange(1, 9999)
         self.num_points_spin.setValue(10)
         params_form.addRow(_form_label("Number of data points"), self.num_points_spin)
+        self.late_spin = QSpinBox()
+        self.late_spin.setRange(5, 3600)
+        self.late_spin.setValue(30)
+        self.late_spin.setSuffix(" s")
+        self.late_spin.setToolTip("A reading entered more than this long after it was due gets a QC flag.")
+        params_form.addRow(_form_label("Flag readings late by"), self.late_spin)
+        self.sound_check = QCheckBox("Beep when a reading is due")
+        self.sound_check.setChecked(True)
+        params_form.addRow("", self.sound_check)
         params.body.addLayout(params_form)
         setup_layout.addWidget(params, 1)
 
@@ -386,6 +467,17 @@ class MainWindow(AppShell):
         self.in_notes = QLineEdit()
         self.in_notes.setPlaceholderText("optional")
         sample_form.addRow(_form_label("Sample notes"), self.in_notes)
+        self.in_sample_id = QLineEdit()
+        self.in_sample_id.setPlaceholderText("e.g. S-001 (groups replicates)")
+        sample_form.addRow(_form_label("Sample ID"), self.in_sample_id)
+        self.queue_edit = QPlainTextEdit()
+        self.queue_edit.setPlaceholderText("Batch queue: one sample ID per line")
+        self.queue_edit.setMaximumHeight(70)
+        self.queue_edit.setAccessibleName("Sample queue")
+        sample_form.addRow(_form_label("Sample queue"), self.queue_edit)
+        self.next_sample_btn = QPushButton("Next sample  (Ctrl+Shift+N)")
+        self.next_sample_btn.clicked.connect(self._next_sample)
+        sample_form.addRow("", self.next_sample_btn)
         sample.body.addLayout(sample_form)
         setup_layout.addWidget(sample, 1)
 
@@ -439,10 +531,20 @@ class MainWindow(AppShell):
         self.in_rpm.editTextChanged.connect(self._update_calc_preview)
         add_btn = QPushButton("Add reading")
         add_btn.setObjectName("Primary")
-        add_btn.setToolTip("Ctrl+Enter")
+        add_btn.setToolTip("Ctrl+Enter, or Enter in the Temperature field")
         add_btn.clicked.connect(self._add_manual_reading)
+        self.add_btn = add_btn
         entry_form.addRow("", add_btn)
         entry.body.addLayout(entry_form)
+        entry.body.addWidget(_form_label(
+            "Keyboard: type the viscosity and press Enter (or the numpad Enter) to move to % torque, then "
+            "temperature; Enter there adds the reading. Values are labelled 'manually transcribed'."))
+        # keyboard-first entry: Enter moves on, Enter in the last field adds the reading
+        self.in_viscosity.returnPressed.connect(self.in_torque.setFocus)
+        self.in_torque.returnPressed.connect(self.in_temp.setFocus)
+        self.in_temp.returnPressed.connect(self._add_manual_reading)
+        self._entry_widgets = [self.in_viscosity, self.in_torque, self.in_temp, self.in_rpm, add_btn,
+                               self.big_readout]
         outer.addWidget(entry)
 
         # --- spindle advisor
@@ -487,6 +589,15 @@ class MainWindow(AppShell):
 
         # --- data: table + live plot in a resizable splitter
         data = Card("Data")
+        trend_row = QHBoxLayout()
+        self.trend_kind = QComboBox()
+        for kind in ("viscosity_time", "torque_time", "temperature_time"):
+            self.trend_kind.addItem(PLOT_TITLES[kind], kind)
+        self.trend_kind.currentIndexChanged.connect(lambda _i: self._refresh_dashboard_plot())
+        trend_row.addWidget(_form_label("Trend"))
+        trend_row.addWidget(self.trend_kind)
+        trend_row.addStretch(1)
+        data.body.addLayout(trend_row)
         splitter = QSplitter(Qt.Vertical)
         self.dash_table_view = _table_view(self.table_model)
         self.dash_table_view.setMinimumHeight(160)
@@ -563,24 +674,40 @@ class MainWindow(AppShell):
         if sr is not None:
             parts.append(f"Shear rate: {sr:,.3f} 1/s")
         self.calc_preview.setText("  ·  ".join(parts) if parts else "")
+        if hasattr(self, "constants_label"):
+            info = SPINDLE_TABLE.get(spindle, {})
+            tk = MODEL_TABLE.get(model)
+            src = info.get("src") or 0
+            self.constants_label.setText(
+                f"TK {tk:g} · SMC {info.get('smc', 0):g} · SRC {src:g}" + ("" if src else " (no shear rate on the DV1)")
+                + " — DV1 manual M14-023-A0416, Appendix D" if tk is not None and info else "")
 
     # ------------------------------------------------------------------ manual entry
     def _add_manual_reading(self):
-        def parse_opt_float(text):
-            text = text.strip()
+        def parse_opt_float(text, name):
+            text = text.strip()      # no decimal-comma guessing: "12,500" could mean 12.5 or 12500
             if not text:
                 return None
             try:
-                return float(text)
+                value = float(text)
             except ValueError:
-                raise ValueError(f"'{text}' is not a valid number")
+                raise ValueError(f"{name}: '{text}' is not a valid number") from None
+            if not math.isfinite(value):
+                raise ValueError(f"{name}: '{text}' is not a valid number (it must be finite)")
+            return value
 
         try:
-            viscosity = parse_opt_float(self.in_viscosity.text())
-            torque = parse_opt_float(self.in_torque.text())
-            temp = parse_opt_float(self.in_temp.text())
+            viscosity = parse_opt_float(self.in_viscosity.text(), "Viscosity")
+            torque = parse_opt_float(self.in_torque.text(), "% Torque")
+            temp = parse_opt_float(self.in_temp.text(), "Temperature")
         except ValueError as e:
             QMessageBox.warning(self, "Invalid input", str(e))
+            return
+        if viscosity is not None and viscosity < 0:
+            QMessageBox.warning(self, "Invalid input", "Viscosity cannot be negative.")
+            return
+        if viscosity is None and torque is None:
+            QMessageBox.warning(self, "Invalid input", "Enter at least the viscosity or the % torque shown on the DV1.")
             return
 
         model, spindle, rpm = self._current_spindle_rpm_model()
@@ -588,21 +715,36 @@ class MainWindow(AppShell):
             timestamp=datetime.now(), viscosity_cp=viscosity, percent_torque=torque,
             temperature_c=temp, rpm=rpm, spindle=spindle, model=model, source="manual",
             notes=self.in_notes.text().strip(), product=self.in_product.text().strip(),
-            batch=self.in_batch.text().strip(),
+            batch=self.in_batch.text().strip(), sample_id=self.in_sample_id.text().strip(),
+            operator=self.notebook.operator,
         )
-        self.readings.append(reading)
-        self.history.record(f"add reading {len(self.readings)}")
-        self._on_readings_changed()
-        self._update_dashboard_readouts(reading)
+        self._log_reading(reading, due_at=self.run_due_at)
+        self.run_due_at = None
 
         status = percent_torque_status(torque)
         if status not in ("ok", "unknown"):
             # Kept as a dialog: an out-of-range torque means the reading itself is suspect.
             QMessageBox.information(self, "Torque out of recommended range", status)
+        elif reading.qc_flags:
+            self.notify(f"Reading {len(self.readings)} added — check: {'; '.join(reading.qc_flags)}", "warning")
         else:
             self.notify(f"Reading {len(self.readings)} added", "success")
         self.in_viscosity.clear()
         self.in_torque.clear()
+        self.in_viscosity.setFocus()
+
+    def _log_reading(self, reading: Reading, *, due_at: datetime | None = None, record: bool = True) -> None:
+        """Add one reading with its QC flags, audit entry and undo step."""
+        previous = self.readings[-1] if self.readings else None
+        flags = qc_flags(reading, previous, self.notebook, due_at=due_at,
+                         late_after_s=self.late_spin.value() if hasattr(self, "late_spin") else 30.0)
+        reading.qc_flags = list(dict.fromkeys(list(reading.qc_flags) + flags))
+        self.readings.append(reading)
+        self._audit("add", f"reading {len(self.readings)} ({reading.source_label()})"
+                    + (f"; flags: {'; '.join(reading.qc_flags)}" if reading.qc_flags else ""))
+        if record:
+            self.history.record(f"add reading {len(self.readings)}")
+            self._on_readings_changed()
 
     def _update_dashboard_readouts(self, reading: Reading):
         def fmt(v):
@@ -614,11 +756,17 @@ class MainWindow(AppShell):
         self.dash_shear_stress_out.set_value(fmt(reading.shear_stress()))
         self.dash_shear_rate_out.set_value(fmt(reading.shear_rate()))
         self.dash_temp_out.set_value(fmt(reading.temperature_c))
+        if hasattr(self, "big_readout"):
+            value = "—" if reading.viscosity_cp is None else f"{reading.viscosity_cp:,.4g}"
+            self.big_readout.setText(f"{value} cP<br><span style='font-size: 14px; font-weight: 500;'>"
+                                     f"{reading.source_label()}</span>")
 
     def _clear_dashboard_readouts(self):
         for tile in (self.dash_visc_out, self.dash_speed_out, self.dash_torque_out,
                      self.dash_shear_stress_out, self.dash_shear_rate_out, self.dash_temp_out):
             tile.set_value("—")
+        if hasattr(self, "big_readout"):
+            self.big_readout.setText("— cP")
 
     def _update_dashboard_status_labels(self):
         self.readings_taken_label.set_value(str(len(self.readings)))
@@ -626,7 +774,8 @@ class MainWindow(AppShell):
     def _refresh_dashboard_plot(self):
         if not hasattr(self, "dash_plot_canvas"):
             return
-        spec = build_figure("viscosity_time", self.readings)
+        kind = self.trend_kind.currentData() if hasattr(self, "trend_kind") else "viscosity_time"
+        spec = build_figure(kind or "viscosity_time", self.readings)
         if spec.is_empty:
             self.dash_plot_canvas.show_message("Add a reading to start the live plot.", self.theme)
         else:
@@ -660,6 +809,8 @@ class MainWindow(AppShell):
         self.run_elapsed_s = 0
         self.run_next_in_s = interval_s
         self.run_active = True
+        self.run_due_at = None
+        self._audit("run", f"timed run started: every {self._format_mmss(interval_s)}, {self.run_target_points} point(s)")
         self.program_status_label.set_value("Running")
         self.run_timer.start()
         self.notify(f"Run started — a reading is due every {self._format_mmss(interval_s)}", "info")
@@ -687,7 +838,9 @@ class MainWindow(AppShell):
         # Non-blocking on purpose: a modal dialog here would steal focus and close any
         # dropdown the user has open at that instant, which looked like a combo-box bug
         # but was this reminder firing mid-interaction.
-        QApplication.beep()
+        if self.sound_check.isChecked():
+            QApplication.beep()
+        self.run_due_at = datetime.now()
         self.program_status_label.set_value("Reading due")
         self.toasts.show_message("Reading due now — enter the value from the DV1 display", "warning", 1800)
         QTimer.singleShot(1500, self._clear_reading_reminder_flash)
@@ -717,10 +870,13 @@ class MainWindow(AppShell):
         load_session_btn.clicked.connect(self._load_session)
         export_csv_btn = QPushButton("Export to CSV…")
         export_csv_btn.clicked.connect(self._export_csv)
+        import_csv_btn = QPushButton("Import CSV…")
+        import_csv_btn.setToolTip("Add readings from a CSV exported by this app (validated line by line).")
+        import_csv_btn.clicked.connect(self._import_csv)
         clear_btn = QPushButton("Clear session")
         clear_btn.setObjectName("Danger")
         clear_btn.clicked.connect(self._clear_session)
-        for b in (delete_btn, save_session_btn, load_session_btn, export_csv_btn):
+        for b in (delete_btn, save_session_btn, load_session_btn, export_csv_btn, import_csv_btn):
             btn_row.addWidget(b)
         btn_row.addStretch()
         btn_row.addWidget(clear_btn)
@@ -744,22 +900,31 @@ class MainWindow(AppShell):
             return
         for row in rows:
             del self.readings[row]
+        self._audit("delete", "reading(s) " + ", ".join(str(r + 1) for r in sorted(rows)))
         self.history.record(f"delete {len(rows)} reading(s)")
         self._on_readings_changed()
         self.notify(f"Deleted {len(rows)} reading(s) — Ctrl+Z to undo", "info")
+
+    def current_session(self) -> Session:
+        return Session(readings=list(self.readings), notebook=self.notebook, audit=list(self.audit),
+                       export_revision=self.export_revision)
 
     def _save_session(self):
         if not self.readings:
             QMessageBox.information(self, "No data", "No readings to save yet.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Session", "dv1_session.json", "JSON files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Session", f"{self._project_name()}.json",
+                                              "JSON files (*.json)")
         if not path:
             return
+        self._audit("save", Path(path).name)
         try:
-            save_session_json(self.readings, path)
-        except Exception as e:
-            QMessageBox.critical(self, "Save failed", str(e))
+            save_session(self.current_session(), path, app_version=APP_VERSION)
+        except Exception as e:                                   # noqa: BLE001
+            show_error(self, "The session could not be saved. The previous file, if any, is unchanged.", e,
+                       title="Save failed")
             return
+        self.dirty = False
         self.notify(f"Session saved to {path}", "success")
 
     def _load_session(self):
@@ -767,9 +932,13 @@ class MainWindow(AppShell):
         if not path:
             return
         try:
-            loaded = load_session_json(path)
-        except Exception as e:
-            QMessageBox.critical(self, "Load failed", str(e))
+            session = load_session(path)
+        except SessionError as e:
+            show_error(self, "This session could not be opened. Nothing was changed.", e, title="Load failed",
+                       hint="The file may be damaged, truncated, or not a DV1 Logger session.")
+            return
+        except Exception as e:                                   # noqa: BLE001
+            show_error(self, "This session could not be opened. Nothing was changed.", e, title="Load failed")
             return
         if self.readings:
             confirm = QMessageBox.question(
@@ -778,11 +947,42 @@ class MainWindow(AppShell):
                 "session. You can undo this with Ctrl+Z. Continue?")
             if confirm != QMessageBox.Yes:
                 return
+        self._apply_session(session, f"load {Path(path).name}")
+        self.dirty = False
+        if session.warnings:
+            QMessageBox.information(self, "Session loaded with notes", "\n\n".join(session.warnings[:10]))
+        self.notify(f"Loaded {len(session.readings)} reading(s) from {path}", "success")
+
+    def _apply_session(self, session: Session, label: str) -> None:
         self.readings.clear()
-        self.readings.extend(loaded)
-        self.history.record(f"load {len(loaded)} reading(s)")
+        self.readings.extend(session.readings)
+        self.notebook = session.notebook
+        self.audit = list(session.audit)
+        self.export_revision = session.export_revision
+        self._audit("load", f"{label}: {len(session.readings)} reading(s), format {session.format_version}")
+        pages.load_notebook_into_page(self)
+        self.history.record(f"{label} ({len(session.readings)} reading(s))")
         self._on_readings_changed()
-        self.notify(f"Loaded {len(loaded)} reading(s) from {path}", "success")
+
+    def _import_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import readings from CSV", "", "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            readings, warnings = readings_from_csv(path)
+        except ImportError_ as e:
+            show_error(self, "The CSV file was not imported. Nothing was changed.", e, title="Import refused")
+            return
+        except Exception as e:                                   # noqa: BLE001
+            show_error(self, "The CSV file could not be read. Nothing was changed.", e, title="Import failed")
+            return
+        self.readings.extend(readings)
+        self._audit("import", f"{len(readings)} reading(s) from {Path(path).name}")
+        self.history.record(f"import {len(readings)} reading(s)")
+        self._on_readings_changed()
+        if warnings:
+            QMessageBox.information(self, "Imported with notes", "\n".join(warnings))
+        self.notify(f"Imported {len(readings)} reading(s) from {Path(path).name}", "success")
 
     def _clear_session(self):
         if not self.readings:
@@ -793,6 +993,7 @@ class MainWindow(AppShell):
         if confirm == QMessageBox.Yes:
             count = len(self.readings)
             self.readings.clear()
+            self._audit("clear", f"{count} reading(s)")
             self.history.record(f"clear {count} reading(s)")
             self._on_readings_changed()
 
@@ -800,15 +1001,24 @@ class MainWindow(AppShell):
         if not self.readings:
             QMessageBox.information(self, "No data", "No readings to export yet.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export to CSV", "dv1_readings.csv", "CSV files (*.csv)")
+        preview = pages.ExportPreviewDialog(self, self.readings, self.notebook, self.export_revision + 1)
+        if preview.exec() != QDialog.Accepted:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export to CSV", f"{self._project_name()}.csv", "CSV files (*.csv)")
         if not path:
             return
         try:
             export_to_csv(self.readings, path)
-        except Exception as e:
-            QMessageBox.critical(self, "Export failed", str(e))
+            self.export_revision += 1
+            prov = Provenance(APP_INFO.name, APP_VERSION, method="DV1 readings export (CSV)",
+                              parameters=provenance_fields(self.notebook, self.readings, self.export_revision))
+            prov.add_source(path)
+            prov.write_beside(path)
+        except Exception as e:                                   # noqa: BLE001
+            show_error(self, "The CSV export could not be written.", e, title="Export failed")
             return
-        self.notify(f"Exported to {path}", "success")
+        self._audit("export", f"CSV {Path(path).name}, revision {self.export_revision}")
+        self.notify(f"Exported to {path} (revision {self.export_revision})", "success")
 
     # ------------------------------------------------------------------ plots
     def _build_plots_tab(self) -> QWidget:
@@ -872,6 +1082,16 @@ class MainWindow(AppShell):
         self.stats_table.setMinimumHeight(360)
         table_card.body.addWidget(self.stats_table, 1)
         layout.addWidget(table_card, 1)
+        models_card = Card("Flow models", "Fitted only when the data support them; ranked by AICc (ΔAICc 0 = best). "
+                                          "Readings outside 10–100 % torque are left out. Fits are not measurements.")
+        self.models_table = ResultTable(["Model", "Status / ΔAICc", "Parameters (95 % CI)", "RMS misfit (%)", "Notes"])
+        self.models_table.setMinimumHeight(220)
+        models_card.body.addWidget(self.models_table, 1)
+        self.models_note = QLabel()
+        self.models_note.setObjectName("Hint")
+        self.models_note.setWordWrap(True)
+        models_card.body.addWidget(self.models_note)
+        layout.addWidget(models_card, 1)
         self.stats_note = QLabel()
         self.stats_note.setObjectName("Hint")
         self.stats_note.setWordWrap(True)
@@ -906,6 +1126,24 @@ class MainWindow(AppShell):
                          "R² matters most when the points span a real range of shear rates — several "
                          "speeds on the same spindle and sample, not a single point.")
         self.stats_note.setText("\n\n".join(notes))
+        self._refresh_models()
+
+    def _refresh_models(self) -> None:
+        comparison = compare_models(self.readings)
+        rows = []
+        for fit in sorted(comparison.fits, key=lambda f: (not f.supported, f.aicc if f.supported else 0)):
+            if not fit.supported:
+                rows.append((f"{fit.model.title}  {fit.model.equation}", "not fitted", "", None, fit.reason))
+                continue
+            params = "; ".join(
+                f"{p.name} = {p.value:.4g} {p.unit}"
+                + (f" [{p.ci_low:.3g}, {p.ci_high:.3g}]" if p.ci_low is not None else f" ({p.note or 'no CI'})")
+                for p in fit.params)
+            rows.append((f"{fit.model.title}  {fit.model.equation}", f"ΔAICc {fit.delta_aicc:.2f}", params,
+                         fit.rms_pct, " ".join(fit.warnings)))
+        self.models_table.fill(rows)
+        self.models_note.setText("\n".join(comparison.warnings) if comparison.data.n else
+                                 "No readings with a shear rate yet: use a spindle that has a shear-rate constant.")
 
     # ------------------------------------------------------------------ serial discovery
     def _build_serial_tab(self) -> QWidget:
@@ -915,7 +1153,8 @@ class MainWindow(AppShell):
         layout.setSpacing(12)
 
         warn = QLabel(
-            "This page is a raw serial terminal for protocol discovery and testing only. It does "
+            "Connections are READ-ONLY: connecting, reading, auto-capture and the instrument sources never "
+            "send a byte until you allow sending for a documented protocol. The app does "
             "NOT send or interpret DV1-specific commands, because no publicly documented DV1 "
             "serial command set could be found (the DV1 manual only documents talking to "
             "Brookfield's own Wingather SQ software). Contact Brookfield/AMETEK support for the "
@@ -931,12 +1170,13 @@ class MainWindow(AppShell):
             missing = Pill("pyserial is not installed. Run: pip install pyserial", "bad")
             layout.addWidget(missing)
 
-        capture = Card("Auto-capture", "Records everything the instrument sends, unattended.")
+        layout.addWidget(pages.build_instrument_card(self))
+
+        capture = Card("Auto-capture", "Records everything the instrument sends, unattended. Never sends anything.")
         capture_intro = QLabel(
-            "The DV1 streams continuous raw frames on its own (no query needed). This does NOT "
-            "decode those frames into viscosity/torque yet — the field meanings aren't confirmed — "
-            "it timestamps and records every raw line so nothing is missed while you correlate it "
-            "against the DV1's display.")
+            "Timestamps and records every raw line received on the port, without decoding it: the meaning "
+            "of any data a DV1 sends is not documented publicly, so nothing is interpreted as viscosity or "
+            "torque. Use it to correlate the raw output with the instrument display.")
         capture_intro.setObjectName("Hint")
         capture_intro.setWordWrap(True)
         capture.body.addWidget(capture_intro)
@@ -959,6 +1199,7 @@ class MainWindow(AppShell):
         self.terminal_output = QPlainTextEdit()
         self.terminal_output.setObjectName("Mono")
         self.terminal_output.setReadOnly(True)
+        self.terminal_output.setMinimumHeight(160)
         if self._terminal_log:
             self.terminal_output.appendPlainText("\n".join(self._terminal_log))
         term.body.addWidget(self.terminal_output, 1)
@@ -968,14 +1209,24 @@ class MainWindow(AppShell):
         self.terminal_input.returnPressed.connect(self._send_terminal_line)
         send_btn = QPushButton("Send")
         send_btn.clicked.connect(self._send_terminal_line)
+        self.send_btn = send_btn
         read_btn = QPushButton("Read now")
         read_btn.clicked.connect(self._read_terminal_now)
+        self.authorize_btn = QPushButton("Allow sending…")
+        self.authorize_btn.setToolTip("The connection is read-only until you state the documented protocol you follow.")
+        self.authorize_btn.clicked.connect(self._authorize_sending)
         send_row.addWidget(self.terminal_input, 1)
         send_row.addWidget(send_btn)
         send_row.addWidget(read_btn)
+        send_row.addWidget(self.authorize_btn)
         term.body.addLayout(send_row)
+        self.write_state_label = QLabel()
+        self.write_state_label.setObjectName("Hint")
+        self.write_state_label.setWordWrap(True)
+        term.body.addWidget(self.write_state_label)
+        self._update_write_state()
         layout.addWidget(term, 1)
-        return w
+        return scrollable(w)
 
     def _toggle_auto_capture(self):
         if self.capture_active:
@@ -1065,6 +1316,7 @@ class MainWindow(AppShell):
             self.connect_btn.setText("Connect")
             self._set_connection_pill("No viscometer", "warn")
             self._log_terminal("[disconnected]")
+            self._update_write_state()
             return
         port = self.port_combo.currentData()
         if not port:
@@ -1075,13 +1327,60 @@ class MainWindow(AppShell):
             self.serial_link = RawSerialLink(port, baudrate=baud, timeout=1.0)
             self.serial_link.open()
         except SerialConnectionError as e:
-            QMessageBox.critical(self, "Connection failed", str(e))
+            show_error(self, f"Could not connect to {port}.", e, title="Connection failed",
+                       hint="Check that the cable is connected, that no other program (for example "
+                            "Wingather SQ) has the port open, and that you chose the right COM port.")
             self.serial_link = None
             return
         self.connect_btn.setText("Disconnect")
-        self._set_connection_pill(f"Connected: {port} @ {baud}", "good")
+        self._update_write_state()
+        self._set_connection_pill(f"Connected (read-only): {port} @ {baud}", "good")
         self._log_terminal(f"[connected to {port} @ {baud} baud]")
         self.notify(f"Connected to {port} at {baud} baud", "success")
+
+    def _update_write_state(self) -> None:
+        if not hasattr(self, "write_state_label"):
+            return
+        link = self.serial_link
+        if link is not None and link.writes_authorized:
+            self.write_state_label.setText(f"Sending ALLOWED on {link.port} — basis: {link.write_reason}. "
+                                           "Ends when you disconnect.")
+            self.send_btn.setEnabled(True)
+            self.authorize_btn.setText("Stop sending")
+        else:
+            self.write_state_label.setText("Read-only: nothing is sent to the instrument. Sending is blocked until "
+                                           "you allow it for a documented protocol (never for the DV1, whose "
+                                           "commands are not public).")
+            self.send_btn.setEnabled(False)
+            self.authorize_btn.setText("Allow sending…")
+        self.terminal_input.setEnabled(link is not None and link.writes_authorized)
+
+    def _authorize_sending(self):
+        link = self.serial_link
+        if link is not None and link.writes_authorized:
+            link.revoke_writes()
+            self._audit("serial", f"sending revoked on {link.port}")
+            self._update_write_state()
+            return
+        if not link or not link.is_open:
+            QMessageBox.information(self, "Not connected", "Connect to a serial port first (Dashboard).")
+            return
+        reason, ok = QInputDialog.getText(
+            self, "Allow sending",
+            "Which documented protocol are you following? Give the document and section "
+            "(for example: Bath XYZ manual rev. B, section 4.2).\n\nDo not send to a DV1: its command set is "
+            "not public and guessed bytes can put the instrument in an unexpected state.")
+        if not ok or not reason.strip():
+            return
+        confirm = QMessageBox.question(
+            self, "Allow sending",
+            f"Bytes typed in the terminal will be sent to {link.port}. Only send commands from the document "
+            f"you named:\n\n{reason.strip()}\n\nAllow sending until you disconnect?")
+        if confirm != QMessageBox.Yes:
+            return
+        link.authorize_writes(reason)
+        self._audit("serial", f"sending allowed on {link.port}: {reason.strip()}")
+        self._update_write_state()
 
     def _send_terminal_line(self):
         if not self.serial_link or not self.serial_link.is_open:
@@ -1091,6 +1390,10 @@ class MainWindow(AppShell):
         try:
             self.serial_link.write_raw((text + "\r\n").encode())
             self._log_terminal(f">> {text}")
+            self._audit("serial", f"sent {text!r} to {self.serial_link.port}")
+        except WriteNotAuthorized as e:
+            QMessageBox.warning(self, "Sending is not allowed", str(e))
+            return
         except SerialConnectionError as e:
             QMessageBox.critical(self, "Send failed", str(e))
         self.terminal_input.clear()
@@ -1106,6 +1409,196 @@ class MainWindow(AppShell):
             return
         self._log_terminal(f"<< {data}" if data else "<< (no data available)")
 
+    # ------------------------------------------------------------------ audit, notebook, queue
+    def _audit(self, action: str, detail: str = "") -> None:
+        self.audit.append(AuditEntry.now(action, detail))
+        if self.is_page_built("notebook"):
+            pages.refresh_notebook_page(self)
+
+    def set_notebook_field(self, key: str, value, audit: bool = True) -> None:
+        if self._nb_loading or getattr(self.notebook, key) == value:
+            return
+        setattr(self.notebook, key, value)
+        if audit:
+            self._audit("notebook", f"{key} = {value!r}")
+        else:
+            pages.refresh_notebook_page(self)
+        self._autosave()
+
+    def set_notebook_target_temperature(self) -> None:
+        text = self.nb_target.text().strip()
+        if not text:
+            self.set_notebook_field("target_temperature_c", None)
+            return
+        try:
+            value = float(text)
+            if not math.isfinite(value):
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "Invalid input", f"Target temperature: '{text}' is not a number.")
+            self.nb_target.setText("" if self.notebook.target_temperature_c is None
+                                   else f"{self.notebook.target_temperature_c:g}")
+            return
+        self.set_notebook_field("target_temperature_c", value)
+
+    def set_checklist_item(self, item: str, on: bool) -> None:
+        if self._nb_loading:
+            return
+        self.notebook.checklist[item] = bool(on)
+        self._audit("checklist", f"{'ticked' if on else 'cleared'}: {item}")
+        self._autosave()
+
+    def _next_sample(self) -> None:
+        queue = [line.strip() for line in self.queue_edit.toPlainText().splitlines() if line.strip()]
+        if not queue:
+            self.notify("The sample queue is empty: type one sample ID per line.", "warning")
+            return
+        current = self.in_sample_id.text().strip()
+        nxt = queue[(queue.index(current) + 1) % len(queue)] if current in queue else queue[0]
+        if current in queue and queue.index(current) == len(queue) - 1:
+            self.notify("That was the last sample in the queue; starting again at the top.", "info")
+        self.in_sample_id.setText(nxt)
+        self._audit("sample", f"next sample {nxt}")
+        self.notify(f"Now measuring {nxt}", "info")
+        self.in_viscosity.setFocus()
+
+    # ------------------------------------------------------------------ accessibility toggles
+    def _toggle_large_controls(self, checked=None) -> None:
+        on = (not getattr(self, "large_controls", False)) if checked is None else bool(checked)
+        self.large_controls = on
+        self.act_large.setChecked(on)
+        style = "font-size: 20px; min-height: 44px;" if on else ""
+        for widget in getattr(self, "_entry_widgets", [])[:-1]:
+            widget.setStyleSheet(style)
+        for widget in (getattr(self, "run_btn", None), getattr(self, "stop_btn", None),
+                       getattr(self, "next_sample_btn", None)):
+            if widget is not None:
+                widget.setStyleSheet(style)
+        self._apply_readout_style()
+
+    def _toggle_high_contrast(self, checked=None) -> None:
+        on = (not getattr(self, "high_contrast", False)) if checked is None else bool(checked)
+        self.high_contrast = on
+        self.act_contrast.setChecked(on)
+        self._apply_readout_style()
+
+    def _apply_readout_style(self) -> None:
+        if not hasattr(self, "big_readout"):
+            return
+        size = 54 if getattr(self, "large_controls", False) else 38
+        if getattr(self, "high_contrast", False):
+            colours = "color: #FFFF00; background: #000000;" if self.theme == "dark" else \
+                      "color: #000000; background: #FFFFFF; border: 3px solid #000000;"
+        else:
+            colours = ""
+        self.big_readout.setStyleSheet(f"font-size: {size}px; font-weight: 700; padding: 8px; "
+                                       f"border-radius: 8px; {colours}")
+
+    # ------------------------------------------------------------------ crash recovery
+    def _autosave(self) -> None:
+        if not self.autosave_enabled:
+            return
+        try:
+            if self.readings:
+                recovery.write_recovery(self.current_session(), APP_VERSION)
+            else:
+                recovery.clear_recovery()
+        except Exception:                                        # noqa: BLE001
+            # Recovery is a safety net: a failure here must never interrupt measuring.
+            pass
+
+    def _offer_recovery(self) -> None:
+        if not self.autosave_enabled or self.readings:
+            return
+        session = recovery.read_recovery()
+        if session is None:
+            return
+        last = session.readings[-1].timestamp.strftime("%Y-%m-%d %H:%M")
+        answer = QMessageBox.question(
+            self, "Recover unsaved session",
+            f"The app did not close normally last time. Restore the unsaved session "
+            f"({len(session.readings)} reading(s), last at {last})?")
+        if answer == QMessageBox.Yes:
+            self._apply_session(session, "recover unsaved session")
+            self.notify(f"Recovered {len(session.readings)} reading(s)", "success")
+        else:
+            recovery.clear_recovery()
+
+    # ------------------------------------------------------------------ instrument sources
+    def _choose_adapter_file(self) -> None:
+        kind = self.adapter_kind.currentData()
+        caption = "Protocol definition" if kind == "protocol" else "Recorded session or CSV"
+        flt = "JSON (*.json)" if kind == "protocol" else "Sessions and CSV (*.json *.csv)"
+        path, _ = QFileDialog.getOpenFileName(self, caption, "", flt)
+        if path:
+            self.adapter_file.setText(path)
+
+    def _make_adapter(self):
+        kind = self.adapter_kind.currentData()
+        model, spindle, _rpm = self._current_spindle_rpm_model()
+        if kind == "simulation":
+            try:
+                rpms = tuple(float(x) for x in self.sim_rpms.text().replace(";", ",").split(",") if x.strip())
+            except ValueError:
+                raise AdapterError("Speeds must be numbers separated by commas.") from None
+            return SimulatedViscometer(model=model, spindle=spindle, rpms=rpms, k_cp=self.sim_k.value(),
+                                       n=self.sim_n.value(), noise_pct=self.sim_noise.value(),
+                                       interval_s=self.adapter_interval.value(), start_time=datetime.now().replace(microsecond=0),
+                                       seed=int(datetime.now().timestamp()))
+        path = self.adapter_file.text().strip()
+        if not path:
+            raise AdapterError("Choose a file first.")
+        if kind == "replay":
+            return ReplayAdapter(path)
+        definition = ProtocolDefinition.from_file(path)
+        if not self.serial_link or not self.serial_link.is_open:
+            raise AdapterError("Connect to the instrument's serial port on the Dashboard first.")
+        return ProtocolAdapter(definition, self.serial_link, model=model, spindle=spindle)
+
+    def _start_adapter(self) -> None:
+        if self.adapter is not None:
+            return
+        try:
+            adapter = self._make_adapter()
+        except AdapterError as e:
+            show_error(self, "The instrument source could not be started.", e, title="Instrument source")
+            return
+        self.adapter = adapter
+        adapter.start()
+        self.adapter_timer.setInterval(int(self.adapter_interval.value() * 1000))
+        self.adapter_timer.start()
+        self.adapter_status.setText(f"Running: {adapter.name} — readings are labelled '{adapter.source}'.")
+        self._audit("source", f"started {adapter.name}" + (f" ({getattr(adapter, 'file_name', '')})"
+                                                          if getattr(adapter, "file_name", "") else ""))
+
+    def _stop_adapter(self, reason: str = "stopped") -> None:
+        if self.adapter is None:
+            return
+        self.adapter_timer.stop()
+        self.adapter.stop()
+        self._audit("source", f"{self.adapter.name} {reason}")
+        self.adapter = None
+        if hasattr(self, "adapter_status"):
+            self.adapter_status.setText(f"Stopped ({reason}).")
+
+    def _on_adapter_tick(self) -> None:
+        if self.adapter is None:
+            return
+        try:
+            new = self.adapter.poll()
+        except (SerialConnectionError, AdapterError) as e:
+            self._stop_adapter("error")
+            show_error(self, "The instrument source stopped.", e, title="Instrument source")
+            return
+        if new:
+            for reading in new:
+                self._log_reading(reading, record=False)
+            self.history.record(f"{len(new)} reading(s) from {self.adapter.name}")
+            self._on_readings_changed()
+            self._update_dashboard_readouts(self.readings[-1])
+        if self.adapter.finished:
+            self._stop_adapter("finished")
+
     # ------------------------------------------------------------------ theme and lifecycle
     def apply_theme(self, theme: str) -> None:
         super().apply_theme(theme)
@@ -1113,10 +1606,23 @@ class MainWindow(AppShell):
             self._refresh_dashboard_plot()
         if hasattr(self, "plot_canvas"):
             self._refresh_plot(quiet=True)
+        if hasattr(self, "compare_canvas"):
+            pages.refresh_compare_page(self)
+        self._apply_readout_style()
 
     def _on_close(self):
+        if self.readings and self.dirty:
+            answer = QMessageBox.question(
+                self, "Unsaved readings",
+                f"{len(self.readings)} reading(s) have changed since the session was last saved. Close anyway? "
+                "They will be offered for recovery the next time the app starts.")
+            if answer != QMessageBox.Yes:
+                return False
+        else:
+            recovery.clear_recovery()
         self.run_timer.stop()
         self.capture_timer.stop()
+        self.adapter_timer.stop()
         if self.serial_link and self.serial_link.is_open:
             self.serial_link.close()
         self._save_settings()
@@ -1130,6 +1636,9 @@ class MainWindow(AppShell):
         settings.setValue("model", self.in_model.currentText())
         settings.setValue("spindle", self.in_spindle.currentText())
         settings.setValue("baud", self.baud_combo.currentText())
+        settings.setValue("large_controls", bool(getattr(self, "large_controls", False)))
+        settings.setValue("high_contrast", bool(getattr(self, "high_contrast", False)))
+        settings.setValue("operator", self.notebook.operator)
         port_data = self.port_combo.currentData()
         if port_data:
             settings.setValue("port", port_data)
@@ -1145,6 +1654,11 @@ class MainWindow(AppShell):
         baud = settings.value("baud")
         if baud and self.baud_combo.findText(baud) >= 0:
             self.baud_combo.setCurrentText(baud)
+        if str(settings.value("large_controls", "false")).lower() == "true":
+            self._toggle_large_controls(True)
+        if str(settings.value("high_contrast", "false")).lower() == "true":
+            self._toggle_high_contrast(True)
+        self._apply_readout_style()
         port = settings.value("port")
         if port:
             idx = self.port_combo.findData(port)

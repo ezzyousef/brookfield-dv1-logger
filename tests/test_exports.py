@@ -89,3 +89,27 @@ def test_excel_report_never_turns_a_note_into_a_formula(tmp_path):
     formulas = [c.coordinate for ws in book for row in ws.iter_rows() for c in row
                 if c.data_type == "f" or (isinstance(c.value, str) and c.value.startswith(("=1+1", "@SUM")))]
     assert formulas == []
+
+
+def test_excel_provenance_carries_the_notebook_sources_and_model_rows(tmp_path):
+    from core.session import ExperimentNotebook
+    readings = make_readings()
+    readings[0].source = "simulated"
+    nb = ExperimentNotebook(title="Series A", instrument_id="DV1-EML-01", calibration_date="2026-06-01",
+                            protocol="SOP-3", checklist={"x": True, "y": False})
+    path = write_workbook(excel_report(readings, version="2.1.0", notebook=nb, revision=4), tmp_path / "p.xlsx")
+    text = " ".join(str(c.value) for ws in openpyxl.load_workbook(path) for row in ws.iter_rows()
+                    for c in row if c.value is not None)
+    for needle in ("DV1-EML-01", "SOP-3", "Export revision", "simulated (not a measurement): 1",
+                   "manually transcribed: 5", "1 of 2 items ticked", "Power law K", "Cross (η∞ = 0): not fitted",
+                   "no standards compliance is claimed"):
+        assert needle in text, needle
+
+
+def test_comparison_figure_has_one_curve_per_sample():
+    from core.figures import comparison_figure
+    a = make_readings(product="A")
+    b = make_readings(product="B", k_value=900.0)
+    spec = comparison_figure(a + b)
+    assert [s.label for s in spec.series] == ["A · B1", "B · B1"]
+    assert not comparison_figure(make_readings(spindle="RV1")).drawable

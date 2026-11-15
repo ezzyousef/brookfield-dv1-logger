@@ -236,7 +236,7 @@ class MainWindow(AppShell):
         self.finalize(start_page="dashboard")
         self._restore_settings()
         self._update_counts()
-        QTimer.singleShot(0, self._offer_recovery)
+        QTimer.singleShot(0, self, self._offer_recovery)     # cancelled if the window is deleted first
 
     # ------------------------------------------------------------------ menus
     def _build_file_menu(self) -> None:
@@ -843,7 +843,7 @@ class MainWindow(AppShell):
         self.run_due_at = datetime.now()
         self.program_status_label.set_value("Reading due")
         self.toasts.show_message("Reading due now — enter the value from the DV1 display", "warning", 1800)
-        QTimer.singleShot(1500, self._clear_reading_reminder_flash)
+        QTimer.singleShot(1500, self, self._clear_reading_reminder_flash)
 
     def _clear_reading_reminder_flash(self):
         if self.run_active:

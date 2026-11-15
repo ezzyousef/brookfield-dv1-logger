@@ -65,7 +65,13 @@ def window(qapp, tmp_path, monkeypatch):
     w.dialogs = dialogs
     w.show()
     yield w
+    w.dirty = False                      # no unsaved-readings prompt during teardown
     w.close()
+    # Delete the window: closed-but-alive windows are re-polished every time a later window
+    # applies the theme, which made each new window slower to build (30-80 s by the end).
+    from PySide6.QtCore import QCoreApplication, QEvent
+    w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def pump(qapp, seconds: float = 0.05) -> None:

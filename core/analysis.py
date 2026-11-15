@@ -363,3 +363,48 @@ def power_law_fit(readings: list[Reading]) -> Optional[dict]:
         "r_squared": r_squared,
         "n_points": n_pts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Unit conversions and torque-based consistency (added in 2.1.0)
+# ---------------------------------------------------------------------------
+# Full-scale torque of the RV spring. TK in MODEL_TABLE is relative to it: TK = 1 for RV,
+# 0.09375 for LV (0.09375 x 7187 = 673.8 dyne*cm), 2 for HA, 8 for HB. This literature value is
+# used only for the informative torque readout; check it against your instrument's manual.
+RV_FULL_SCALE_TORQUE_DYNE_CM = 7187.0
+
+
+def viscosity_from_torque_cp(model: str, spindle: str, rpm: float, percent_torque: float) -> Optional[float]:
+    """Viscosity implied by a torque reading: eta = (%torque / 100) x FSR.
+
+    This follows from the definition of the full-scale range (the viscosity at 100 % torque) in
+    Appendix D of the DV1 manual. Used to catch transcription errors between the two numbers
+    the DV1 displays.
+    """
+    fsr = full_scale_range_cp(model, spindle, rpm)
+    if fsr is None or percent_torque is None:
+        return None
+    return percent_torque / 100.0 * fsr
+
+
+def torque_dyne_cm(model: str, percent_torque: Optional[float]) -> Optional[float]:
+    tk = MODEL_TABLE.get(model)
+    if tk is None or percent_torque is None:
+        return None
+    return tk * RV_FULL_SCALE_TORQUE_DYNE_CM * percent_torque / 100.0
+
+
+def cp_to_pa_s(viscosity_cp: float) -> float:
+    """1 cP = 1 mPa*s = 0.001 Pa*s."""
+    return viscosity_cp / 1000.0
+
+
+def dyn_cm2_to_pa(stress_dyn_cm2: float) -> float:
+    """1 dyn/cm^2 = 1e-5 N / 1e-4 m^2 = 0.1 Pa."""
+    return stress_dyn_cm2 / 10.0
+
+
+def shear_stress_pa(viscosity_cp: Optional[float], shear_rate_1_per_s: Optional[float]) -> Optional[float]:
+    if viscosity_cp is None or shear_rate_1_per_s is None:
+        return None
+    return cp_to_pa_s(viscosity_cp) * shear_rate_1_per_s

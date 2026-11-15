@@ -2,6 +2,23 @@
 
 ## 2.1.0 (2026-11-15)
 
+### Fixed after an independent Codex review
+- The raw terminal now **refuses** to send on a connection identified as a DV1: by the instrument
+  name (now required), the stated document, or the port's USB description. Before, it only warned.
+- Herschel–Bulkley (and any ill-conditioned fit) no longer crashes when building intervals.
+  Unresolved intervals are suppressed with a stated reason.
+- The formula guard covers every exported text cell (source, spindle, model, source label, QC
+  flags, torque status, notes, notebook and settings values). Only complete numeric literals are
+  exempt, so `-1+2` is guarded.
+- Reversible escaping: exactly one apostrophe is added to text starting with = + - @ tab CR or an
+  apostrophe, and exactly one is removed on re-import. Text whitespace is kept.
+- CSV import refuses short rows (a missing value must be an explicit empty field) and duplicate
+  column names.
+- Each fit's warnings (for example an unresolved yield stress) are exported with its parameters.
+- Session notebooks are validated (types, finite numbers, ranges, checklist booleans).
+- The absolute torque readout (dyne·cm) was removed: its constant had no traceable
+  manufacturer source.
+
 ### Fixed
 - **CSV import read wrong values when a row had more values than the header.** pandas used the extra leading values as row labels and shifted every column. For example, `2026-01-01 12:00:00,100,50,999` was loaded with timestamp 100. Rows are now validated one by one before parsing, and a wider row is refused with its line number. Title lines above the header and trailing empty fields are handled.
 - **Excel and CSV exports could run a note as a spreadsheet formula.** A note such as `=1+1` was written by xlsxwriter as a formula. Text cells starting with `=`, `+`, `@`, or `-` followed by a non-digit now get a leading apostrophe, which CSV import removes again.

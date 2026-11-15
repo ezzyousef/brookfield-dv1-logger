@@ -21,7 +21,8 @@ ISCC.exe /DMyAppVersion=2.1.0 installer.iss
 | After labkit 1.2.0 sync (`sync.py --apply --test`) | 44 | 44 passed |
 | After milestone A (importers) | 85 | 85 passed |
 | After milestone B (adapters, rheology) | 159 | 159 passed |
-| Final | **189** | **189 passed in 50 s**; source self-test passed (12 checks); frozen exe self-test passed (12 checks) |
+| After the 2.1.0 build | 189 | 189 passed in 50 s |
+| Final, after the Codex review | **224** | **224 passed in 53 s**; source self-test passed (12 checks); frozen exe self-test passed (12 checks) |
 
 New test files:
 
@@ -57,4 +58,4 @@ Every serial test uses `FakeSerial`, which records each byte. With no authorisat
 - High-DPI and screen-reader checks were not done beyond the accessible names that were set.
 - The light theme was not captured (it is exercised by `test_every_page_builds_in_both_themes`).
 - Spindle constants could not be compared with the printed manual.
-- No independent (Codex) review was run: **NOT RUN**.
+- An independent Codex review was run afterwards; its 9 findings are regression-tested in `test_codex_review.py` (35 tests) and fixed (see `UPGRADE_HANDOFF.md`).

@@ -88,7 +88,7 @@ def test_reading_and_capture_never_write(link):
 def test_writes_need_a_stated_reason_and_end_when_the_port_closes(link):
     with pytest.raises(WriteNotAuthorized):
         link.authorize_writes("   ")
-    link.authorize_writes("Example manual rev. B, section 4")
+    link.authorize_writes("Example manual rev. B, section 4", instrument="Example thermometer")
     link.write_raw(b"Q\r\n")
     assert FakeSerial.instances[0].written == b"Q\r\n"
     link.close()
@@ -100,7 +100,7 @@ def test_writes_need_a_stated_reason_and_end_when_the_port_closes(link):
 
 
 def test_revoking_stops_writes(link):
-    link.authorize_writes("doc")
+    link.authorize_writes("doc", instrument="Example thermometer")
     link.revoke_writes()
     with pytest.raises(WriteNotAuthorized):
         link.write_raw(b"x")
@@ -147,14 +147,14 @@ def test_protocol_adapter_sends_its_documented_query_only_when_authorised(link):
     definition = _definition(allow_commands=True, authorized_by="Lab manager", document_section="4.2",
                              query_command="T?")
     adapter = ProtocolAdapter(definition, link)
-    link.authorize_writes("Example manual rev. B, section 4.2")
+    link.authorize_writes("Example manual rev. B, section 4.2", instrument="Example thermometer")
     adapter.poll()
     assert port.written == b"T?\r\n"
 
 
 def test_a_listen_only_definition_never_sends_even_on_an_authorised_port(link):
     adapter = ProtocolAdapter(_definition(), link)
-    link.authorize_writes("doc")
+    link.authorize_writes("doc", instrument="Example thermometer")
     adapter.poll()
     assert FakeSerial.instances[0].written == b""
 

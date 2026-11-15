@@ -22,8 +22,9 @@ manually entered data.
 The **Instrument** page offers a simulated viscometer (for training), replay of recorded
 sessions, and user-supplied *documented* line protocols for other instruments
 (`docs/PROTOCOL_DEFINITIONS.md`). It also has a raw serial terminal. **Every connection is
-read-only:** nothing is sent until you allow sending and name the protocol document you are
-following, and the permission ends when you disconnect. Definitions for the DV1 are refused.
+read-only:** nothing is sent until you allow sending, name the instrument and the protocol document you
+are following, and the permission ends when you disconnect. Sending to a DV1, and definitions
+for the DV1, are refused.
 Every reading is labelled with its source (manually transcribed, simulated, replayed, or
 received from an instrument). To wire up live
 auto-logging, ask Brookfield/AMETEK support for the DV1 interface command reference and put

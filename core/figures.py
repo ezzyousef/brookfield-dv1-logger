@@ -11,7 +11,7 @@ from typing import Sequence
 import numpy as np
 
 from core.analysis import Reading, power_law_fit, summarize
-from core.data_io import READING_COLUMNS, readings_to_dataframe
+from core.data_io import READING_COLUMNS, guard_text, readings_to_dataframe
 from core.rheology import compare_models
 from core.session import ExperimentNotebook
 from labkit.excel import ExcelAnalysis, ExcelReport
@@ -144,6 +144,8 @@ def model_rows(readings: Sequence[Reading]) -> list[tuple]:
         for p in fit.params:
             ci = (f"95 % CI {p.ci_low:.4g} … {p.ci_high:.4g}" if p.ci_low is not None else (p.note or "no interval"))
             rows.append((f"{fit.model.title} {p.name}", p.value, p.unit, ci))
+        for w in fit.warnings:
+            rows.append((f"{fit.model.title}: warning", "", "", w))
     for w in comparison.warnings:
         rows.append(("Note", "", "", w))
     return rows
@@ -169,7 +171,7 @@ def provenance_fields(notebook: ExperimentNotebook | None, readings: Sequence[Re
         out["Measurement checklist"] = f"{done} of {len(nb.checklist)} items ticked"
     if revision is not None:
         out["Export revision"] = str(revision)
-    return out
+    return {k: guard_text(v) for k, v in out.items()}      # notebook text is user input
 
 
 def origin_book(readings: Sequence[Reading], name: str = "DV1 readings") -> OriginBook:
@@ -188,7 +190,7 @@ def excel_report(readings: Sequence[Reading], *, version: str, project: str = "D
         title=project, group="Viscosity readings", results=summary_results(readings) + model_rows(readings),
         figures=[f for f in all_figures(readings) if not f.is_empty],
         table={col: frame[col].tolist() for col in READING_COLUMNS},
-        settings=settings or {})
+        settings={k: guard_text(str(v)) for k, v in (settings or {}).items()})
     return ExcelReport(APP_NAME, version, project=project, author=author, analyses=[analysis],
                        extra_provenance=provenance_fields(notebook, readings, revision))
 

@@ -1324,7 +1324,8 @@ class MainWindow(AppShell):
             return
         baud = int(self.baud_combo.currentText())
         try:
-            self.serial_link = RawSerialLink(port, baudrate=baud, timeout=1.0)
+            self.serial_link = RawSerialLink(port, baudrate=baud, timeout=1.0,
+                                             description=self.port_combo.currentText())
             self.serial_link.open()
         except SerialConnectionError as e:
             show_error(self, f"Could not connect to {port}.", e, title="Connection failed",
@@ -1365,20 +1366,32 @@ class MainWindow(AppShell):
         if not link or not link.is_open:
             QMessageBox.information(self, "Not connected", "Connect to a serial port first (Dashboard).")
             return
+        instrument, ok = QInputDialog.getText(
+            self, "Allow sending",
+            "Which instrument is connected to this port (make and model)?\n\nSending to a Brookfield DV1 is "
+            "refused: its command set is not public.")
+        if not ok or not instrument.strip():
+            return
         reason, ok = QInputDialog.getText(
             self, "Allow sending",
             "Which documented protocol are you following? Give the document and section "
-            "(for example: Bath XYZ manual rev. B, section 4.2).\n\nDo not send to a DV1: its command set is "
-            "not public and guessed bytes can put the instrument in an unexpected state.")
+            "(for example: Bath XYZ manual rev. B, section 4.2).")
         if not ok or not reason.strip():
+            return
+        try:
+            link.authorize_writes(reason, instrument=instrument)
+            link.revoke_writes()                   # checked; granted only after the confirmation below
+        except WriteNotAuthorized as e:
+            self._audit("serial", f"sending refused on {link.port} ({instrument.strip()})")
+            QMessageBox.warning(self, "Sending refused", str(e))
             return
         confirm = QMessageBox.question(
             self, "Allow sending",
-            f"Bytes typed in the terminal will be sent to {link.port}. Only send commands from the document "
-            f"you named:\n\n{reason.strip()}\n\nAllow sending until you disconnect?")
+            f"Bytes typed in the terminal will be sent to {link.port} ({instrument.strip()}). Only send commands "
+            f"from the document you named:\n\n{reason.strip()}\n\nAllow sending until you disconnect?")
         if confirm != QMessageBox.Yes:
             return
-        link.authorize_writes(reason)
+        link.authorize_writes(reason, instrument=instrument)
         self._audit("serial", f"sending allowed on {link.port}: {reason.strip()}")
         self._update_write_state()
 

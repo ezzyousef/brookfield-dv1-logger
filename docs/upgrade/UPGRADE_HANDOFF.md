@@ -6,7 +6,7 @@
 | Branch | `upgrade/05-brookfield`, from `feature/licensing` at `11bd09c` (pushed; not merged into main) |
 | Version | 2.0.0 → 2.1.0 (`ui/resources.py`, `installer.iss`) |
 | labkit | 1.1.0 → 1.2.0 (`sync.py --apply --test --only brookfield_dv1_logger`: synced, 44 passed; backup in `.labkit-backup/20261115-115508`) |
-| Tests | `py -3 -m pytest -q -p no:cacheprovider` (offscreen): **189 passed** (44 at baseline: +40 hostile files, +40 oracle, +34 instruments, +28 UI, +3 exports) |
+| Tests | `py -3 -m pytest -q -p no:cacheprovider` (offscreen): **224 passed** (44 at baseline: +40 hostile files, +40 oracle, +34 instruments, +28 UI, +3 exports, +35 Codex-review regressions) |
 | Builds | PyInstaller onedir: frozen `--selftest` passed. `DV1Logger-Setup-2.1.0.exe` compiled, SHA-256 `07795320C7E96444463D3DE0A6799FB48282163C3F8FF515A742DF7526C88D83`; not installed |
 
 ## Targets (05 prompt): before → now
@@ -28,6 +28,27 @@
 3. Sessions: locale encoding, non-atomic save, no validation.
 4. `nan`/`inf` accepted on entry.
 5. Deferred recovery check firing on a deleted window (`QTimer.singleShot(0, self, ...)`).
+
+## Codex review (2026-11-15)
+
+An independent read-only review (`AI_Engineering_Knowledge_Base/reports/codex/05-brookfield-upgrade-review.md`)
+found 2 high, 6 medium and 1 low issue. All 9 were reproduced with the reviewer's input as failing tests in
+`tests/test_codex_review.py`, then fixed:
+
+| Severity | Finding | Fix |
+|---|---|---|
+| High | HB intervals: OverflowError | `core/rheology.py` (condition check, unresolved intervals with reason, overflow guard) |
+| High | Formula guard missed source/spindle/model/labels/flags, and `-1+2` | `core/data_io.py` `guard_text` on every text cell; `core/figures.py` provenance and settings |
+| Medium | Short rows silently shifted values | `core/data_io.py` `_clean_records` refuses them |
+| Medium | Duplicate column names | refused in `_clean_records` |
+| Medium | Notes lost whitespace and leading apostrophes | reversible one-apostrophe convention; text cells not stripped |
+| Medium | Fit warnings not exported | `core/figures.py` `model_rows` |
+| Medium | Notebook types not validated | `core/data_io.py` `_notebook_from_dict` |
+| Medium | DV1 sending only warned against | `core/serial_interface.py` `authorize_writes(reason, instrument)` refuses DV1; UI asks for the instrument |
+| Low | 7187 dyne·cm untraceable | readout withheld (`core/analysis.py`) |
+
+The reviewer's note that atomic replacement lives in labkit (outside this repo's review) still stands: it is
+covered here only by `test_save_is_atomic_when_writing_fails`.
 
 ## Left out, with blockers
 

@@ -19,7 +19,8 @@
 ## Security notes
 
 - Serial writes are blocked by default; the barrier is tested with a simulated port.
-- Spreadsheet formula injection from notes is neutralised.
+- Spreadsheet formula injection from any exported text cell is neutralised (reversible: one apostrophe added, one removed on re-import).
+- Sending on a connection named or described as a DV1 is refused, not just warned against.
 - Session and CSV files are size-limited and validated before use. Instructions found inside data files are kept as plain notes and never acted on.
 
 ## Not verified

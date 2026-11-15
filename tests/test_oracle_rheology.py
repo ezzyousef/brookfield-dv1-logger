@@ -52,12 +52,10 @@ def test_shear_stress_units():
     assert A.cp_to_pa_s(1.0) == pytest.approx(1e-3)
 
 
-def test_viscosity_from_torque_and_torque_in_dyne_cm():
+def test_viscosity_from_torque():
     assert A.viscosity_from_torque_cp("DV1MLV", "LV1", 60.0, 50.0) == pytest.approx(50.0)
     assert A.viscosity_from_torque_cp("DV1MRV", "RV3", 10.0, 37.5) == pytest.approx(3750.0)
-    # LV spring = 0.09375 of the RV spring's 7187 dyne·cm
-    assert A.torque_dyne_cm("DV1MLV", 100.0) == pytest.approx(673.78125)
-    assert A.torque_dyne_cm("DV1MHB", 50.0) == pytest.approx(0.5 * 8 * 7187.0)
+    # the absolute torque (dyne·cm) readout was withheld: see test_codex_review.py
 
 
 # ----------------------------------------------------------------------------- Student t

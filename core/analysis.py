@@ -368,10 +368,9 @@ def power_law_fit(readings: list[Reading]) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 # Unit conversions and torque-based consistency (added in 2.1.0)
 # ---------------------------------------------------------------------------
-# Full-scale torque of the RV spring. TK in MODEL_TABLE is relative to it: TK = 1 for RV,
-# 0.09375 for LV (0.09375 x 7187 = 673.8 dyne*cm), 2 for HA, 8 for HB. This literature value is
-# used only for the informative torque readout; check it against your instrument's manual.
-RV_FULL_SCALE_TORQUE_DYNE_CM = 7187.0
+# No absolute torque (dyne*cm) is computed: the spring torque it would need is not stated in
+# any manufacturer document available to this project, so the readout is withheld rather than
+# based on an untraceable constant (Codex review, 2026-11-15). Torque stays in % of full scale.
 
 
 def viscosity_from_torque_cp(model: str, spindle: str, rpm: float, percent_torque: float) -> Optional[float]:
@@ -385,13 +384,6 @@ def viscosity_from_torque_cp(model: str, spindle: str, rpm: float, percent_torqu
     if fsr is None or percent_torque is None:
         return None
     return percent_torque / 100.0 * fsr
-
-
-def torque_dyne_cm(model: str, percent_torque: Optional[float]) -> Optional[float]:
-    tk = MODEL_TABLE.get(model)
-    if tk is None or percent_torque is None:
-        return None
-    return tk * RV_FULL_SCALE_TORQUE_DYNE_CM * percent_torque / 100.0
 
 
 def cp_to_pa_s(viscosity_cp: float) -> float:

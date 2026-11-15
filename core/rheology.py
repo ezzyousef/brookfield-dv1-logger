@@ -224,6 +224,8 @@ MODELS = {
                      _eta_carreau, min_decades=1.5, needs_plateau=True),
 }
 
+MAX_CONDITION = 1e14         # JᵀJ condition number above which intervals are not reported
+MAX_LOG_HALF_WIDTH = math.log(1e3)   # log-scale half-width above which an interval is "not resolved"
 PLATEAU_SLOPE = -0.15       # local d ln(eta)/d ln(gamma) above this at the low-rate end = a plateau
 PLATEAU_CONTRAST = 0.15     # and the high-rate end must be at least this much steeper
 
@@ -419,15 +421,20 @@ def fit_model(model: Model | str, data: FlowData) -> FitResult:
     J = _jacobian(model, data, theta)
     tq = t_ppf(0.975, dof)
     warnings = []
+    JTJ = J.T @ J
+    with np.errstate(all="ignore"):
+        condition = float(np.linalg.cond(JTJ)) if np.all(np.isfinite(JTJ)) else math.inf
     try:
-        cov = s2 * np.linalg.inv(J.T @ J)
+        if not condition < MAX_CONDITION:
+            raise np.linalg.LinAlgError
+        cov = s2 * np.linalg.inv(JTJ)
         se = np.sqrt(np.clip(np.diag(cov), 0, None))
         if not np.all(np.isfinite(se)):
             raise np.linalg.LinAlgError
     except np.linalg.LinAlgError:
         se = np.full(p, math.nan)
-        warnings.append("The parameters are not separately determined by these data (singular fit); "
-                        "no confidence intervals.")
+        warnings.append("The parameters are not separately determined by these data (ill-conditioned fit, "
+                        f"condition number {condition:.2g}); no confidence intervals.")
     params = []
     for i, prm in enumerate(model.params):
         value = _to_natural(model, theta)[i]
@@ -438,8 +445,19 @@ def fit_model(model: Model | str, data: FlowData) -> FitResult:
             note = f"at its bound ({prm.lower:g}); no interval"
         elif not math.isfinite(se[i]):
             lo_ci, hi_ci = None, None
+            note = "not resolved by these data (ill-conditioned fit); no interval"
         elif prm.log:
-            lo_ci, hi_ci = math.exp(theta[i] - tq * se[i]), math.exp(theta[i] + tq * se[i])
+            half = tq * se[i]
+            if half > MAX_LOG_HALF_WIDTH:
+                lo_ci, hi_ci = None, None
+                note = (f"not resolved by these data (interval spans more than a factor "
+                        f"{math.exp(MAX_LOG_HALF_WIDTH):.0f} either way); no interval")
+            else:
+                try:
+                    lo_ci, hi_ci = math.exp(theta[i] - half), math.exp(theta[i] + half)
+                except OverflowError:
+                    lo_ci, hi_ci = None, None
+                    note = "not resolved by these data (interval overflows); no interval"
         else:
             lo_ci, hi_ci = theta[i] - tq * se[i], theta[i] + tq * se[i]
         params.append(ParamResult(prm.name, prm.unit, value, lo_ci, hi_ci, note))

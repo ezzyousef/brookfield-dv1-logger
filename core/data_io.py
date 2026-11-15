@@ -15,6 +15,7 @@ import csv
 import io
 import json
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -55,7 +56,8 @@ READING_COLUMNS = [
 NUMERIC_FIELDS = ("viscosity_cp", "percent_torque", "temperature_c", "rpm")
 OPTIONAL_TEXT_FIELDS = ("spindle", "model")                  # may be null
 TEXT_FIELDS = ("source", "notes", "product", "batch", "sample_id", "operator")
-_FORMULA_START = ("=", "+", "@", "\t", "\r")
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+_NUMBER = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?")
 
 
 class ImportError_(ValueError):
@@ -70,21 +72,20 @@ class SessionError(ValueError):
 def guard_text(text: str) -> str:
     """Stop a spreadsheet from running a text cell as a formula (CSV/formula injection).
 
-    A leading = + @ tab or CR, or a '-' not followed by a digit, gets a leading apostrophe.
-    unguard_text() removes it again on re-import.
+    Escaping convention (reversible): a text cell gets ONE leading apostrophe when it starts
+    with = + - @ tab or CR, unless the whole cell is a plain number such as -5 or +3.5e2, or when
+    it already starts with an apostrophe. unguard_text() removes exactly one leading apostrophe,
+    so every text, including one that really starts with ', comes back unchanged.
     """
     if not text:
         return text
-    first = text[0]
-    if first in _FORMULA_START or (first == "-" and not (len(text) > 1 and (text[1].isdigit() or text[1] == "."))):
+    if text[0] == "'" or (text[0] in _FORMULA_START and not _NUMBER.fullmatch(text)):
         return "'" + text
     return text
 
 
 def unguard_text(text: str) -> str:
-    if len(text) > 1 and text[0] == "'" and (text[1] in _FORMULA_START or text[1] == "-"):
-        return text[1:]
-    return text
+    return text[1:] if text.startswith("'") else text
 
 
 def readings_to_dataframe(readings: List[Reading]) -> pd.DataFrame:
@@ -96,20 +97,20 @@ def readings_to_dataframe(readings: List[Reading]) -> pd.DataFrame:
             "batch": guard_text(r.batch),
             "viscosity_cp": r.viscosity_cp,
             "percent_torque": r.percent_torque,
-            "torque_status": r.torque_status(),
+            "torque_status": guard_text(r.torque_status()),
             "temperature_c": r.temperature_c,
             "rpm": r.rpm,
-            "spindle": r.spindle,
-            "model": r.model,
+            "spindle": guard_text(r.spindle) if r.spindle else r.spindle,
+            "model": guard_text(r.model) if r.model else r.model,
             "shear_rate_1_per_s": r.shear_rate(),
             "shear_stress_dyn_cm2": r.shear_stress(),
             "full_scale_range_cp": r.fsr(),
-            "source": r.source,
+            "source": guard_text(r.source),
             "notes": guard_text(r.notes),
             "sample_id": guard_text(r.sample_id),
             "operator": guard_text(r.operator),
-            "source_label": r.source_label(),
-            "qc_flags": "; ".join(r.qc_flags),
+            "source_label": guard_text(r.source_label()),
+            "qc_flags": guard_text("; ".join(r.qc_flags)),
         })
     return pd.DataFrame(rows, columns=READING_COLUMNS)
 
@@ -176,7 +177,6 @@ def _clean_records(text: str) -> tuple[list[str], list[tuple[int, list[str]]], l
             row.pop()
         return row
 
-    records = [(n, norm(r)) for n, r in records]
     header_at = 0
     for i, (_, r) in enumerate(records[:20]):
         if any(c.strip().lower() == "timestamp" for c in r):
@@ -185,18 +185,34 @@ def _clean_records(text: str) -> tuple[list[str], list[tuple[int, list[str]]], l
     warnings = []
     if header_at:
         warnings.append(f"{header_at} title line(s) above the column names were skipped.")
-    header = [c.strip() for c in records[header_at][1]]
+    header = [c.strip() for c in norm(records[header_at][1])]
     data = records[header_at + 1:]
     if not data:
         raise ImportError_("The file has column names but no data rows.")
     width = len(header)
-    wider = [(n, len(r)) for n, r in data if len(r) > width]
-    if wider:
-        line, count = wider[0]
-        raise ImportError_(f"Line {line} has {count} values but the header has {width} "
-                           f"({len(wider)} such line(s) in total). The file was not imported, "
-                           "because the values could not be assigned to columns reliably.")
-    return header, [(n, r + [""] * (width - len(r))) for n, r in data], warnings
+    seen: dict[str, int] = {}
+    for name in header:
+        key = name.lower()
+        if key:
+            seen[key] = seen.get(key, 0) + 1
+    duplicates = [name for name in header if name and seen[name.lower()] > 1]
+    if duplicates:
+        raise ImportError_(f"The column name '{duplicates[0]}' appears more than once, so its values are "
+                           "ambiguous. The file was not imported.")
+    rows = []
+    for n, raw in data:
+        if len(raw) < width:
+            raise ImportError_(f"Line {n} has {len(raw)} values but the header has {width}. A missing value must "
+                               "be an empty field (two commas in a row), otherwise it is not clear which column "
+                               "is missing. The file was not imported.")
+        row = list(raw)
+        while len(row) > width and not row[-1].strip():     # trailing delimiters only
+            row.pop()
+        if len(row) > width:
+            raise ImportError_(f"Line {n} has {len(row)} values but the header has {width}. The file was not "
+                               "imported, because the values could not be assigned to columns reliably.")
+        rows.append((n, row))
+    return header, rows, warnings
 
 
 def import_from_csv(path: str) -> pd.DataFrame:
@@ -229,9 +245,13 @@ def readings_from_csv(path: str) -> tuple[List[Reading], list[str]]:
         raise ImportError_("The file has no 'timestamp' column, so it is not a DV1 Logger CSV export.")
     readings = []
     for line, cells in rows:
-        def cell(name):
+        def cell(name):          # numbers, timestamps and codes: surrounding spaces ignored
             i = index.get(name)
             return cells[i].strip() if i is not None else ""
+
+        def text(name):          # free text: kept exactly, then the export guard is removed
+            i = index.get(name)
+            return unguard_text(cells[i]) if i is not None else ""
         try:
             ts = datetime.fromisoformat(cell("timestamp"))
         except ValueError:
@@ -249,12 +269,12 @@ def readings_from_csv(path: str) -> tuple[List[Reading], list[str]]:
             if not math.isfinite(v):
                 raise ImportError_(f"Line {line}: {name} '{raw}' is not a finite number.")
             values[name] = v
-        flags = [f.strip() for f in cell("qc_flags").split(";") if f.strip()]
+        flags = [f.strip() for f in text("qc_flags").split(";") if f.strip()]
         readings.append(Reading(
-            timestamp=ts, spindle=cell("spindle") or None, model=cell("model") or None,
-            source=cell("source") or "manual", notes=unguard_text(cell("notes")),
-            product=unguard_text(cell("product")), batch=unguard_text(cell("batch")),
-            sample_id=unguard_text(cell("sample_id")), operator=unguard_text(cell("operator")),
+            timestamp=ts, spindle=unguard_text(cell("spindle")) or None, model=unguard_text(cell("model")) or None,
+            source=unguard_text(cell("source")) or "manual", notes=text("notes"),
+            product=text("product"), batch=text("batch"),
+            sample_id=text("sample_id"), operator=text("operator"),
             qc_flags=flags, **values))
     return readings, warnings
 
@@ -344,6 +364,43 @@ def _reading_from_dict(row, k: int, warnings: list[str]) -> Reading:
     return Reading(timestamp=timestamp, qc_flags=list(flags), **kwargs)
 
 
+_NOTEBOOK_TEXT = ("title", "instrument_id", "instrument_serial", "calibration_date", "calibration_reference",
+                  "operator", "protocol", "sample_preparation", "notes")
+
+
+def _finite_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _notebook_from_dict(nb: dict) -> ExperimentNotebook:
+    """Validate every notebook field before it reaches the app (types, finite numbers, ranges)."""
+    def bad(field, why):
+        return SessionError(f"The session is damaged: notebook field '{field}' {why}.")
+    for key in _NOTEBOOK_TEXT:
+        if key in nb and not isinstance(nb[key], str):
+            raise bad(key, "is not text")
+    if "calibration_interval_months" in nb:
+        v = nb["calibration_interval_months"]
+        if not (isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 1200):
+            raise bad("calibration_interval_months", "must be a whole number of months from 0 to 1200")
+    if nb.get("target_temperature_c") is not None:
+        v = nb["target_temperature_c"]
+        if not (_finite_number(v) and -273.15 <= v <= 1000):
+            raise bad("target_temperature_c", "must be a finite temperature in °C or empty")
+    if "temperature_tolerance_c" in nb:
+        v = nb["temperature_tolerance_c"]
+        if not (_finite_number(v) and 0 < v <= 100):
+            raise bad("temperature_tolerance_c", "must be a positive number of °C")
+    if "checklist" in nb:
+        c = nb["checklist"]
+        if not isinstance(c, dict) or not all(isinstance(k, str) and isinstance(x, bool) for k, x in c.items()):
+            raise bad("checklist", "must map each item to true or false")
+    try:
+        return ExperimentNotebook.from_dict(nb)
+    except TypeError:
+        raise SessionError("The session is damaged: the notebook is not readable.") from None
+
+
 def load_session(path: str) -> Session:
     """Load a session saved by any released version (format 1 = 2.0.0's bare list, format 2)."""
     text, _ = _read_text(path, error=SessionError)
@@ -379,10 +436,7 @@ def load_session(path: str) -> Session:
     else:
         raise SessionError("This file is not a DV1 Logger session.")
     readings = [_reading_from_dict(row, k, warnings) for k, row in enumerate(rows, start=1)]
-    try:
-        notebook = ExperimentNotebook.from_dict(nb)
-    except TypeError:
-        raise SessionError("The session is damaged: the notebook is not readable.") from None
+    notebook = _notebook_from_dict(nb)
     entries = []
     for a in audit:
         if isinstance(a, dict) and all(isinstance(a.get(k, ""), str) for k in ("time", "action", "detail")):

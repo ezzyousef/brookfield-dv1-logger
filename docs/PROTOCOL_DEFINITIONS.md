@@ -15,7 +15,7 @@
 | `document_section` | for commands | Where in the document the query command is defined |
 | `authorized_by` | for commands | Who approved sending commands to this instrument |
 | `allow_commands` | for commands | `true` to permit `query_command` |
-| `query_command` | no | Text sent once per poll. It is sent only when all of the three fields above are set **and** you have allowed sending on the port (Instrument page → Allow sending…) |
+| `query_command` | no | Text sent once per poll. It is sent only when all of the three fields above are set **and** you have allowed sending on the port (Instrument page → Allow sending…, which asks for the instrument and the document, and refuses a DV1) |
 | `line_ending` | no | Default `"\r\n"` |
 | `baudrate` | no | Recorded with the definition. Set the actual port speed on the Dashboard |
 

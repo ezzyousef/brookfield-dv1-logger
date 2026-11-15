@@ -259,8 +259,8 @@ def fake_port(window, monkeypatch):
     import ui.main_window as mw
     FakeSerial.instances.clear()
     monkeypatch.setattr(mw, "RawSerialLink",
-                        lambda port, baudrate=9600, timeout=1.0: mw.__dict__["_RealLink"](port, baudrate, timeout,
-                                                                                         serial_factory=FakeSerial))
+                        lambda port, baudrate=9600, timeout=1.0, description="": mw.__dict__["_RealLink"](
+                            port, baudrate, timeout, serial_factory=FakeSerial, description=description))
     from core.serial_interface import RawSerialLink
     mw._RealLink = RawSerialLink
     window.port_combo.clear()
@@ -284,7 +284,8 @@ def test_terminal_is_read_only_until_sending_is_allowed(window, qapp, fake_port,
     window._on_capture_tick()
     window._read_terminal_now()
     assert len(window.raw_capture) == 2 and fake_port.written == b""
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Bath manual rev. B, section 4", True)))
+    answers = iter([("Example bath controller", True), ("Bath manual rev. B, section 4", True)])
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: next(answers)))
     window._authorize_sending()
     assert window.send_btn.isEnabled()
     window.terminal_input.setText("T?")

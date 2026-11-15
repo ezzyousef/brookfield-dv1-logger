@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from core.analysis import Reading, full_scale_range_cp, shear_rate_per_sec
+from core.serial_interface import DV1_NAME
 
 DV1_UNAVAILABLE_REASON = (
     "Live DV1 automation is unavailable. Brookfield's DV1 Operating Instructions (M14-023-A0416) "
@@ -38,7 +39,7 @@ DV1_UNAVAILABLE_REASON = (
 PARSEABLE_FIELDS = ("viscosity_cp", "percent_torque", "temperature_c", "rpm")
 MAX_LINE_CHARS = 256          # longer lines are ignored (guards the user's regex against huge input)
 MAX_PATTERN_CHARS = 400
-_DV1_NAME = re.compile(r"(?i)\bdv[\s\-]?1\b|\bdv1m")
+_DV1_NAME = DV1_NAME          # one definition, in core.serial_interface
 
 
 class AdapterError(ValueError):

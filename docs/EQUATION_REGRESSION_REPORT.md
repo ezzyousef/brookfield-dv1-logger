@@ -20,9 +20,8 @@ There are three kinds of check:
 | Shear rate = SRC·rpm | SC4-18 (SRC 1.32) at 10 rpm; ULA (1.223) at 60; CPA-40Z (7.5) at 2; LV-2C (0.212) at 100 | 13.2; 73.38; 15; 21.2 s⁻¹ | equal (1e-12) |
 | Shear stress | 1000 cP at 13.2 s⁻¹ | 1 Pa·s × 13.2 = 13.2 Pa = 132 dyn/cm² | 132 dyn/cm², 13.2 Pa |
 | Viscosity from torque = %/100 · FSR | LV1 at 60 rpm, 50 %; RV3 at 10 rpm, 37.5 % | 50 cP; 3750 cP | 50; 3750 cP |
-| Torque in dyne·cm = TK · 7187 · %/100 | LV, 100 %; HB, 50 % | 673.78; 28 748 dyne·cm | equal |
 
-The spindle and model constants are the ones transcribed from manual M14-023-A0416 (Appendix D) by the original author. The tests check the arithmetic and that the app's table holds the values typed into the test. They cannot check the transcription against the printed manual: no copy of the manual is in the repository. The 7187 dyne·cm RV spring torque is a literature value. It is used only for an informative readout, and the LV/HA/HB ratios in the TK table agree with it.
+The spindle and model constants are the ones transcribed from manual M14-023-A0416 (Appendix D) by the original author. The tests check the arithmetic and that the app's table holds the values typed into the test. They cannot check the transcription against the printed manual: no copy of the manual is in the repository. An absolute torque readout (dyne·cm) was **withheld** after the Codex review: the spring torque it needs is not stated in any manufacturer document available to this project, and the app does not use an untraceable constant. Torque is reported in % of full scale only.
 
 ## Student-t quantile (core/rheology.py)
 
@@ -64,11 +63,13 @@ For parameters fitted on a log scale (K, μ, μp, η₀, λ), the interval is co
 
 ## Data-support rules (tested)
 
-- A power-law fit to pure power-law data passes. Cross and Carreau are **refused** ("no low-shear plateau"), so the app never invents η₀ and λ.
+- A power-law fit to pure power-law data passes. Cross and Carreau are **refused** ("no low-shear plateau"). This guards against fitting η₀ and λ to data that do not show them, but the plateau test is a heuristic (local slope thresholds), not a proof that a fitted plateau is physically real.
 - Herschel–Bulkley with 4 points is refused (it needs 5). Five readings at one shear rate are refused ("different shear rates"). A power law over 10 to 13 s⁻¹ is refused (less than 0.3 decade), while Newtonian is allowed.
 - Readings without a shear-rate constant (RV3), outside 10–100 % torque, or without a viscosity are left out, each with its reason.
 - AICc picks the model the data came from: Newtonian (1 % noise), Herschel–Bulkley (0.5 % noise) and power law (1 % noise).
 - Herschel–Bulkley fitted to data without a yield stress puts τ₀ at its bound 0 and flags it as "not resolved". A Newtonian fit to shear-thinning data is flagged as a systematic misfit.
+
+- **Ill-conditioned fits (Codex review).** Herschel–Bulkley on η = 1000/γ̇ ± 1 % (γ̇ = 1…100 s⁻¹, 8 points) used to crash with OverflowError while building the interval. Now intervals are suppressed with a stated reason when JᵀJ is ill-conditioned (condition number ≥ 1e14), when a log-scale interval spans more than a factor 1000, or on overflow (`test_codex_review.py::test_ill_conditioned_herschel_bulkley_does_not_crash`).
 
 ## Replicates, hysteresis, QC (core/compare.py, core/qc.py)
 

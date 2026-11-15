@@ -33,7 +33,12 @@ can be extended accordingly -- ask and I can wire that up directly.
 """
 
 from __future__ import annotations
+import re
 from typing import List, Optional
+
+# A connection, instrument or document naming a DV1. Sending is refused for any of them: the
+# DV1 command set is not public (see the module docstring).
+DV1_NAME = re.compile(r"(?i)\bdv[\s\-]?1\b|\bdv1m")
 
 try:
     import serial
@@ -88,7 +93,8 @@ class RawSerialLink:
     `serial_factory` replaces `serial.Serial` (tests pass a simulated port; no hardware needed).
     """
 
-    def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0, serial_factory=None):
+    def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0, serial_factory=None,
+                 description: str = ""):
         if serial_factory is None and not PYSERIAL_AVAILABLE:
             raise SerialConnectionError(
                 "pyserial is not installed. Run: pip install pyserial"
@@ -100,6 +106,8 @@ class RawSerialLink:
         self._conn = None
         self._write_reason = ""
         self.bytes_written = 0
+        self.description = description      # the port's USB description, if known
+        self.instrument = ""
 
     def open(self) -> None:
         factory = self._factory or serial.Serial
@@ -127,12 +135,25 @@ class RawSerialLink:
     def write_reason(self) -> str:
         return self._write_reason
 
-    def authorize_writes(self, reason: str) -> None:
-        """Allow sending on this open port. `reason` (the user's documented basis) is required."""
+    def authorize_writes(self, reason: str, instrument: str = "") -> None:
+        """Allow sending on this open port.
+
+        `instrument` (what is connected) and `reason` (the documented protocol followed) are both
+        required. Sending is REFUSED when the instrument, the reason or the port's description
+        names a DV1, whose command set is not public.
+        """
         if not self.is_open:
             raise SerialConnectionError("Port is not open.")
         if not reason or not reason.strip():
             raise WriteNotAuthorized("Sending needs a stated reason (the protocol document you are following).")
+        if not instrument or not instrument.strip():
+            raise WriteNotAuthorized("Sending needs the connected instrument to be named.")
+        for text in (instrument, reason, self.description):
+            if text and DV1_NAME.search(text):
+                raise WriteNotAuthorized(
+                    "Sending to a Brookfield DV1 is refused: its command set is not publicly documented, and "
+                    "guessed bytes could put the instrument in an unexpected state. Enter readings manually.")
+        self.instrument = instrument.strip()
         self._write_reason = reason.strip()
 
     def revoke_writes(self) -> None:

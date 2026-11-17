@@ -33,7 +33,12 @@ can be extended accordingly -- ask and I can wire that up directly.
 """
 
 from __future__ import annotations
+import re
 from typing import List, Optional
+
+# A connection, instrument or document naming a DV1. Sending is refused for any of them: the
+# DV1 command set is not public (see the module docstring).
+DV1_NAME = re.compile(r"(?i)\bdv[\s\-]?1\b|\bdv1m")
 
 try:
     import serial
@@ -72,29 +77,42 @@ class SerialConnectionError(Exception):
     pass
 
 
+class WriteNotAuthorized(SerialConnectionError):
+    """Raised when something tries to send bytes on a port the user has not authorised."""
+
+
 class RawSerialLink:
     """
     Thin wrapper around pyserial for raw, protocol-agnostic access.
-    The GUI's "Discovery / Terminal" tab uses this directly so you can send
-    bytes and observe raw responses while you work out (or confirm) the
-    actual command set with Brookfield.
+
+    READ-ONLY BY DEFAULT. Opening, reading and auto-capture never send a byte. Sending requires
+    `authorize_writes(reason)`, which the GUI calls only after the user confirms that they have
+    documentation for the instrument on that port. The authorisation ends when the port closes.
+    This is the single place bytes leave the app, so it is the barrier the tests exercise.
+
+    `serial_factory` replaces `serial.Serial` (tests pass a simulated port; no hardware needed).
     """
 
-    def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
-        if not PYSERIAL_AVAILABLE:
+    def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0, serial_factory=None,
+                 description: str = ""):
+        if serial_factory is None and not PYSERIAL_AVAILABLE:
             raise SerialConnectionError(
                 "pyserial is not installed. Run: pip install pyserial"
             )
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
-        self._conn: Optional["serial.Serial"] = None
+        self._factory = serial_factory
+        self._conn = None
+        self._write_reason = ""
+        self.bytes_written = 0
+        self.description = description      # the port's USB description, if known
+        self.instrument = ""
 
     def open(self) -> None:
+        factory = self._factory or serial.Serial
         try:
-            self._conn = serial.Serial(
-                port=self.port, baudrate=self.baudrate, timeout=self.timeout
-            )
+            self._conn = factory(port=self.port, baudrate=self.baudrate, timeout=self.timeout)
         except Exception as e:
             raise SerialConnectionError(f"Could not open {self.port}: {e}") from e
 
@@ -102,15 +120,54 @@ class RawSerialLink:
         if self._conn and self._conn.is_open:
             self._conn.close()
         self._conn = None
+        self._write_reason = ""
 
     @property
     def is_open(self) -> bool:
         return self._conn is not None and self._conn.is_open
 
+    # ---- write authorisation
+    @property
+    def writes_authorized(self) -> bool:
+        return bool(self._write_reason) and self.is_open
+
+    @property
+    def write_reason(self) -> str:
+        return self._write_reason
+
+    def authorize_writes(self, reason: str, instrument: str = "") -> None:
+        """Allow sending on this open port.
+
+        `instrument` (what is connected) and `reason` (the documented protocol followed) are both
+        required. Sending is REFUSED when the instrument, the reason or the port's description
+        names a DV1, whose command set is not public.
+        """
+        if not self.is_open:
+            raise SerialConnectionError("Port is not open.")
+        if not reason or not reason.strip():
+            raise WriteNotAuthorized("Sending needs a stated reason (the protocol document you are following).")
+        if not instrument or not instrument.strip():
+            raise WriteNotAuthorized("Sending needs the connected instrument to be named.")
+        for text in (instrument, reason, self.description):
+            if text and DV1_NAME.search(text):
+                raise WriteNotAuthorized(
+                    "Sending to a Brookfield DV1 is refused: its command set is not publicly documented, and "
+                    "guessed bytes could put the instrument in an unexpected state. Enter readings manually.")
+        self.instrument = instrument.strip()
+        self._write_reason = reason.strip()
+
+    def revoke_writes(self) -> None:
+        self._write_reason = ""
+
     def write_raw(self, data: bytes) -> None:
         if not self.is_open:
             raise SerialConnectionError("Port is not open.")
+        if not self.writes_authorized:
+            raise WriteNotAuthorized(
+                f"Sending to {self.port} is not authorised. The connection is read-only until you "
+                "allow sending for a documented protocol.")
         self._conn.write(data)
+        self.bytes_written += len(data)
 
     def read_line(self) -> Optional[str]:
         """Read a single newline-terminated line, if any arrived within the timeout."""

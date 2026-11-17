@@ -8,6 +8,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
+# never touch the user's real crash-recovery file from the tests
+import tempfile  # noqa: E402
+os.environ["DV1_LOGGER_DATA_DIR"] = tempfile.mkdtemp(prefix="dv1-tests-")
 
 
 @pytest.fixture(scope="session")
@@ -45,6 +48,7 @@ def window(qapp, tmp_path, monkeypatch):
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QMessageBox
 
+    monkeypatch.setenv("DV1_LOGGER_DATA_DIR", str(tmp_path / "data"))
     QSettings.setDefaultFormat(QSettings.IniFormat)
     QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path / "settings"))
     dialogs: list[tuple[str, str]] = []
@@ -61,7 +65,13 @@ def window(qapp, tmp_path, monkeypatch):
     w.dialogs = dialogs
     w.show()
     yield w
+    w.dirty = False                      # no unsaved-readings prompt during teardown
     w.close()
+    # Delete the window: closed-but-alive windows are re-polished every time a later window
+    # applies the theme, which made each new window slower to build (30-80 s by the end).
+    from PySide6.QtCore import QCoreApplication, QEvent
+    w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def pump(qapp, seconds: float = 0.05) -> None:

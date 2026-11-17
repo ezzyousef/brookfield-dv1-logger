@@ -15,6 +15,8 @@ from pathlib import Path
 
 def run_selftest() -> int:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    # keep the self-test away from the user's crash-recovery file (and its restore prompt)
+    os.environ["DV1_LOGGER_DATA_DIR"] = tempfile.mkdtemp(prefix="dv1-selftest-")
     failures: list[str] = []
 
     def check(label: str, ok: bool, detail: str = "") -> None:
@@ -37,11 +39,58 @@ def run_selftest() -> int:
     t0 = datetime(2026, 1, 1, 12, 0, 0)
     readings = [Reading(timestamp=t0 + timedelta(seconds=30 * i), viscosity_cp=2000.0 / (1 + i) ** 0.3,
                         percent_torque=40.0 + i, temperature_c=23.0 + 0.1 * i, rpm=rpm,
-                        spindle="SC4-18", model="LVDV1", product="Gel", batch="B1")
+                        spindle="SC4-18", model="DV1MLV", product="Gel", batch="B1")
                 for i, rpm in enumerate([1.0, 2.0, 5.0, 10.0, 20.0, 50.0])]
     fit = power_law_fit(readings)
     check("power-law fit on synthetic shear-thinning data", fit is not None and fit["n"] < 1,
           str(fit))
+    try:
+        from core.data_io import load_session, save_session
+        from core.instruments import AdapterUnavailable, ProtocolDefinition, SimulatedViscometer
+        from core.rheology import compare_models
+        from core.serial_interface import RawSerialLink, WriteNotAuthorized
+        from core.session import Session
+
+        sim = SimulatedViscometer(model="DV1MLV", spindle="SC4-18", rpms=(5.0, 10.0, 20.0, 50.0, 100.0),
+                                  k_cp=200.0, n=0.6)
+        simulated = [r for _ in range(5) for r in sim.poll()]
+        best = compare_models(simulated).best
+        check("flow models: power law recovered from simulated data",
+              best is not None and best.model.key == "power_law" and abs(best.value("n") - 0.6) < 1e-6,
+              str(best and best.params))
+
+        class _Port:                      # simulated serial port: records any byte written
+            def __init__(self, **_):
+                self.is_open, self.written, self.in_waiting = True, b"", 0
+
+            def write(self, data):
+                self.written += data
+
+            def close(self):
+                self.is_open = False
+        link = RawSerialLink("SIM", serial_factory=_Port)
+        link.open()
+        try:
+            link.write_raw(b"x")
+            blocked = False
+        except WriteNotAuthorized:
+            blocked = True
+        check("serial connection is read-only until authorised", blocked and link._conn.written == b"")
+        link.close()
+        try:
+            ProtocolDefinition.from_dict({"name": "x", "instrument": "Brookfield DV1", "document": "x",
+                                          "line_pattern": r"(?P<rpm>\d+)"})
+            refused = False
+        except AdapterUnavailable:
+            refused = True
+        check("DV1 protocol definitions are refused", refused)
+        with tempfile.TemporaryDirectory() as tmp:
+            save_session(Session(readings=simulated), str(Path(tmp) / "s.json"))
+            back = load_session(str(Path(tmp) / "s.json")).readings
+            check("session round trip (format 2)", back == simulated)
+    except Exception as exc:                                    # noqa: BLE001
+        check("2.1.0 core features", False, f"{type(exc).__name__}: {exc}")
+
     specs = [build_figure(k, readings) for k in PLOT_KINDS]
     check(f"{sum(not s.is_empty for s in specs)} of {len(PLOT_KINDS)} figures have data",
           all(not s.is_empty for s in specs))

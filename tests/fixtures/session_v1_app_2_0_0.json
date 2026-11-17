@@ -1,0 +1,41 @@
+[
+  {
+    "timestamp": "2026-03-02T10:15:00",
+    "viscosity_cp": 1520.0,
+    "percent_torque": 45.3,
+    "temperature_c": 24.9,
+    "rpm": 6.0,
+    "spindle": "SC4-18",
+    "model": "DV1MLV",
+    "source": "manual",
+    "notes": "",
+    "product": "Gel 2 wt%",
+    "batch": "B3"
+  },
+  {
+    "timestamp": "2026-03-02T10:16:00",
+    "viscosity_cp": 1290.0,
+    "percent_torque": 52.1,
+    "temperature_c": null,
+    "rpm": 10.0,
+    "spindle": "SC4-18",
+    "model": "DV1MLV",
+    "source": "manual",
+    "notes": "bubble near spindle",
+    "product": "Gel 2 wt%",
+    "batch": "B3"
+  },
+  {
+    "timestamp": "2026-03-02T10:17:00",
+    "viscosity_cp": 1010.0,
+    "percent_torque": 61.0,
+    "temperature_c": 25.0,
+    "rpm": 20.0,
+    "spindle": "SC4-18",
+    "model": "DV1MLV",
+    "source": "manual",
+    "notes": "",
+    "product": "Gel 2 wt%",
+    "batch": "B3"
+  }
+]

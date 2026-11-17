@@ -225,6 +225,21 @@ def percent_torque_status(percent_torque: Optional[float]) -> str:
     return "ok"
 
 
+# Where a reading came from. Only "manual" is typed in by a person; it is a transcription of the
+# instrument display, not a value received from the instrument, and every export says so.
+SOURCE_LABELS = {
+    "manual": "manually transcribed",
+    "serial": "received from instrument",
+    "protocol": "received from instrument (documented protocol)",
+    "simulated": "simulated (not a measurement)",
+    "replay": "replayed from a recorded file",
+}
+
+
+def source_label(source: str) -> str:
+    return SOURCE_LABELS.get(source, source or "unknown")
+
+
 @dataclass
 class Reading:
     """A single logged data point, whether entered manually or received over serial."""
@@ -235,10 +250,14 @@ class Reading:
     rpm: Optional[float] = None
     spindle: Optional[str] = None
     model: Optional[str] = None
-    source: str = "manual"  # "manual" or "serial"
+    source: str = "manual"  # see SOURCE_LABELS: manual | serial | simulated | replay | protocol
     notes: str = ""
     product: str = ""
     batch: str = ""
+    # added in 2.1.0 (session format 2); defaults keep every 2.0.0 session loadable
+    sample_id: str = ""
+    operator: str = ""
+    qc_flags: list = field(default_factory=list)
 
     def torque_status(self) -> str:
         return percent_torque_status(self.percent_torque)
@@ -255,6 +274,9 @@ class Reading:
         if self.spindle is None or self.model is None or self.rpm is None:
             return None
         return full_scale_range_cp(self.model, self.spindle, self.rpm)
+
+    def source_label(self) -> str:
+        return source_label(self.source)
 
 
 def summarize(readings: list[Reading]) -> dict:
@@ -341,3 +363,40 @@ def power_law_fit(readings: list[Reading]) -> Optional[dict]:
         "r_squared": r_squared,
         "n_points": n_pts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Unit conversions and torque-based consistency (added in 2.1.0)
+# ---------------------------------------------------------------------------
+# No absolute torque (dyne*cm) is computed: the spring torque it would need is not stated in
+# any manufacturer document available to this project, so the readout is withheld rather than
+# based on an untraceable constant (Codex review, 2026-11-15). Torque stays in % of full scale.
+
+
+def viscosity_from_torque_cp(model: str, spindle: str, rpm: float, percent_torque: float) -> Optional[float]:
+    """Viscosity implied by a torque reading: eta = (%torque / 100) x FSR.
+
+    This follows from the definition of the full-scale range (the viscosity at 100 % torque) in
+    Appendix D of the DV1 manual. Used to catch transcription errors between the two numbers
+    the DV1 displays.
+    """
+    fsr = full_scale_range_cp(model, spindle, rpm)
+    if fsr is None or percent_torque is None:
+        return None
+    return percent_torque / 100.0 * fsr
+
+
+def cp_to_pa_s(viscosity_cp: float) -> float:
+    """1 cP = 1 mPa*s = 0.001 Pa*s."""
+    return viscosity_cp / 1000.0
+
+
+def dyn_cm2_to_pa(stress_dyn_cm2: float) -> float:
+    """1 dyn/cm^2 = 1e-5 N / 1e-4 m^2 = 0.1 Pa."""
+    return stress_dyn_cm2 / 10.0
+
+
+def shear_stress_pa(viscosity_cp: Optional[float], shear_rate_1_per_s: Optional[float]) -> Optional[float]:
+    if viscosity_cp is None or shear_rate_1_per_s is None:
+        return None
+    return cp_to_pa_s(viscosity_cp) * shear_rate_1_per_s
